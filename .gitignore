@@ -7,6 +7,11 @@ __pycache__/
 .venv/
 venv/
 node_modules/
+.audit-*/
+.pip-audit*.json
+.coverage
+coverage.xml
+htmlcov/
 .env
 .env.*
 

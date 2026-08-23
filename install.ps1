@@ -28,11 +28,11 @@ foreach ($folder in @('agents', 'assets', 'references', 'scripts')) {
 }
 
 if ($InstallDependencies) {
-    python -m pip install -r (Join-Path $repoRoot 'requirements.txt')
+    python -m pip install --disable-pip-version-check --only-binary=:all: -r (Join-Path $repoRoot 'requirements.txt')
     if ($LASTEXITCODE -ne 0) {
         throw 'Python dependency installation failed.'
     }
-    npm --prefix $destination install --omit=dev
+    npm --prefix $destination install --omit=dev --ignore-scripts
     if ($LASTEXITCODE -ne 0) {
         throw 'Node dependency installation failed.'
     }
