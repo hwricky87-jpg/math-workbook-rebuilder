@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
-"""Regression smoke test for prism, internal line, curve, and prism-net rules."""
+"""Regression test for geometry, projection, multigraph, artifact, and PDF gates."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import pymupdf
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from geometry_svg import polygon_on_edge, render_manifest
+from imgprobe import cut_crossings, ring_strands, stability_report
 from validate_delivery import validate_delivery_manifest
-from validate_geometry import svg_fit, validate_manifest
+from validate_geometry import (
+    graph_structure,
+    svg_fit,
+    validate_artifact_evidence,
+    validate_graph_probe_artifacts,
+    validate_manifest,
+    verification_report,
+)
 
 
 def save_case(directory: Path, name: str, manifest: dict) -> tuple[Path, Path, dict]:
@@ -129,12 +140,68 @@ def main() -> int:
         }
     }
 
+    graph_curves = [
+        {"name": "KN-1", "points": ["K", [88, 64], "N"], "style": "solid"},
+        {"name": "KN-2", "points": ["K", [101, 82], "N"], "style": "solid"},
+        {"name": "KN-3", "points": ["K", [114, 99], "N"], "style": "solid"},
+        {"name": "KR-1", "points": ["K", [95, 145], "R"], "style": "solid"},
+        {"name": "KR-2", "points": ["K", [111, 166], "R"], "style": "solid"},
+        {"name": "NR-1", "points": ["N", [132, 117], "R"], "style": "solid"},
+        {"name": "NR-2", "points": ["N", [158, 120], "R"], "style": "solid"},
+        {"name": "ND-1", "points": ["N", [193, 61], "D"], "style": "solid"},
+        {"name": "DR-1", "points": ["D", [219, 120], "R"], "style": "solid"},
+        {"name": "DR-2", "points": ["D", [205, 139], "R"], "style": "solid"},
+        {"name": "DR-3", "points": ["D", [191, 157], "R"], "style": "solid"},
+        {"name": "DR-4", "points": ["D", [178, 174], "R"], "style": "solid"},
+    ]
+    graph = {
+        "type": "graph",
+        "source": {"fixture": "synthetic-multigraph"},
+        "semantic_check": "A four-vertex multigraph whose measured degrees uniquely reject an undercount.",
+        "canvas": {"width": 300, "height": 240},
+        "points": {"K": [45, 120], "N": [140, 35], "D": [255, 95], "R": [150, 205]},
+        "curves": graph_curves,
+        "labels": [
+            {"text": "K", "at": "K", "offset": [-14, 0]},
+            {"text": "N", "at": "N", "offset": [0, -14]},
+            {"text": "D", "at": "D", "offset": [14, 0]},
+            {"text": "R", "at": "R", "offset": [0, 16]},
+        ],
+        "graph_evidence": {
+            "method": "independent ring-degree and midpoint-cut measurements",
+            "inspection_artifact": "synthetic-graph-inspection.png",
+            "source_size": [600, 480],
+            "source_sha256": "0" * 64,
+            "inspection_sha256": "1" * 64,
+            "vertices": {
+                "K": {"degree": 5, "probe_report": "K-degree.json"},
+                "N": {"degree": 6, "probe_report": "N-degree.json"},
+                "D": {"degree": 5, "probe_report": "D-degree.json"},
+                "R": {"degree": 8, "probe_report": "R-degree.json"},
+            },
+            "edge_groups": [
+                {"vertices": ["K", "N"], "multiplicity": 3,
+                 "drawn_elements": ["KN-1", "KN-2", "KN-3"], "probe_report": "KN-cut.json"},
+                {"vertices": ["K", "R"], "multiplicity": 2,
+                 "drawn_elements": ["KR-1", "KR-2"], "probe_report": "KR-cut.json"},
+                {"vertices": ["N", "R"], "multiplicity": 2,
+                 "drawn_elements": ["NR-1", "NR-2"], "probe_report": "NR-cut.json"},
+                {"vertices": ["N", "D"], "multiplicity": 1,
+                 "drawn_elements": ["ND-1"], "probe_report": "ND-cut.json"},
+                {"vertices": ["D", "R"], "multiplicity": 4,
+                 "drawn_elements": ["DR-1", "DR-2", "DR-3", "DR-4"],
+                 "probe_report": "DR-cut.json"},
+            ],
+        },
+    }
+
     reports = {}
     rendered = []
     for name, manifest in (
         ("pentagonal-prism", prism),
         ("hexagonal-net", net),
         ("asymmetric-trace", trace),
+        ("measured-multigraph", graph),
     ):
         _, svg_path, report = save_case(args.out, name, manifest)
         reports[name] = report
@@ -197,8 +264,166 @@ def main() -> int:
     inflated_tolerance = json.loads(json.dumps(trace))
     inflated_tolerance["trace_evidence"]["max_normalized_error"] = 0.25
     inflated_tolerance_report = validate_manifest(inflated_tolerance)
+    undercounted_graph = json.loads(json.dumps(graph))
+    undercounted_graph["graph_evidence"]["edge_groups"][0]["multiplicity"] = 2
+    undercounted_graph["graph_evidence"]["edge_groups"][0]["drawn_elements"] = ["KN-1", "KN-2"]
+    undercounted_graph_report = graph_structure(undercounted_graph)
+    incomplete_degrees = json.loads(json.dumps(graph))
+    incomplete_degrees["graph_evidence"]["vertices"]["K"].pop("degree")
+    incomplete_degrees_report = graph_structure(incomplete_degrees)
+    reused_drawn = json.loads(json.dumps(graph))
+    reused_drawn["graph_evidence"]["edge_groups"][1]["drawn_elements"][0] = "KN-1"
+    reused_drawn_report = graph_structure(reused_drawn)
+    self_referential = verification_report({
+        "verification_evidence": {
+            "kind": "reconstructed-answer",
+            "description": "Expected value was calculated from the same reconstructed edges.",
+        }
+    })
     clipped_svg_report = svg_fit(
         '<svg viewBox="0 0 100 100"><line x1="-8" y1="10" x2="50" y2="50"/></svg>'
+    )
+    defs_pattern_report = svg_fit(
+        '<svg viewBox="0 0 100 100"><defs><pattern id="stip" width="5" height="5" '
+        'patternUnits="userSpaceOnUse"><rect x="0" y="0" width="5" height="5"/>'
+        '<circle cx="1" cy="1" r="1"/></pattern></defs>'
+        '<rect x="10" y="10" width="80" height="80" fill="url(#stip)"/></svg>'
+    )
+
+    radial_image = Image.new("L", (201, 201), 255)
+    radial_draw = ImageDraw.Draw(radial_image)
+    for endpoint in ((180, 100), (20, 100), (100, 20), (100, 180)):
+        radial_draw.line((100, 100, *endpoint), fill=0, width=2)
+    radial_array = np.asarray(radial_image, dtype=np.float32)
+    ring_probe_ok = len(ring_strands(radial_array, 100, 100, 36, 128)) == 4
+    radial_path = args.out / "ring-probe-source.png"
+    radial_report_path = args.out / "ring-probe-report.json"
+    radial_image.save(radial_path)
+    subprocess.run([
+        sys.executable, str(Path(__file__).with_name("imgprobe.py")), str(radial_path),
+        "--deg", "100", "100", "--radii", "28", "32", "36", "40",
+        "--stable-samples", "3", "--thr", "128", "--report", str(radial_report_path),
+    ], check=True, capture_output=True, text=True)
+
+    cut_image = Image.new("L", (201, 201), 255)
+    cut_draw = ImageDraw.Draw(cut_image)
+    for y in (94, 100, 106):
+        cut_draw.line((20, y, 180, y), fill=0, width=2)
+    cut_array = np.asarray(cut_image, dtype=np.float32)
+    cut_probe_ok = cut_crossings(cut_array, (20, 100), (180, 100), 128, 18) == 3
+    cut_path = args.out / "cut-probe-source.png"
+    cut_report_path = args.out / "cut-probe-report.json"
+    cut_image.save(cut_path)
+    subprocess.run([
+        sys.executable, str(Path(__file__).with_name("imgprobe.py")), str(cut_path),
+        "--cut", "20", "100", "180", "100", "--half-lengths", "12", "15", "18", "21",
+        "--stable-samples", "3", "--thr", "128", "--report", str(cut_report_path),
+    ], check=True, capture_output=True, text=True)
+    imgprobe_cli_ok = (
+        json.loads(radial_report_path.read_text(encoding="utf-8"))["degree"]["stable_count"] == 4
+        and json.loads(cut_report_path.read_text(encoding="utf-8"))["cut"]["stable_count"] == 3
+    )
+    stability_probe_ok = (
+        stability_report([5, 5, 5, 6], 3)["stable_count"] == 5
+        and stability_report([5, 5, 6, 6], 3)["ok"] is False
+        and stability_report([5, 5, 5, 6, 6, 6], 3)["ok"] is False
+    )
+
+    graph_source_path = args.out / "graph-probe-source.png"
+    graph_inspection_path = args.out / "graph-probe-inspection.png"
+    Image.new("L", (120, 100), 255).save(graph_source_path)
+    Image.new("L", (240, 200), 255).save(graph_inspection_path)
+    source_hash = hashlib.sha256(graph_source_path.read_bytes()).hexdigest()
+    inspection_hash = hashlib.sha256(graph_inspection_path.read_bytes()).hexdigest()
+    artifact_graph = json.loads(json.dumps(graph))
+    artifact_evidence = artifact_graph["graph_evidence"]
+    artifact_evidence["source_size"] = [120, 100]
+    artifact_evidence["source_sha256"] = source_hash
+    artifact_evidence["inspection_artifact"] = graph_inspection_path.name
+    artifact_evidence["inspection_sha256"] = inspection_hash
+    for name, record in artifact_evidence["vertices"].items():
+        report_path = args.out / f"{name}-degree.json"
+        record["probe_report"] = report_path.name
+        report_path.write_text(json.dumps({
+            "ok": True,
+            "source_sha256": source_hash,
+            "image_size": [120, 100],
+            "degree": {
+                "ok": True,
+                "stable_count": record["degree"],
+                "minimum_samples": 3,
+                "counts": [record["degree"]] * 3,
+            },
+        }), encoding="utf-8")
+    for group in artifact_evidence["edge_groups"]:
+        edge_name = "-".join(group["vertices"])
+        report_path = args.out / f"{edge_name}-cut.json"
+        group["probe_report"] = report_path.name
+        report_path.write_text(json.dumps({
+            "ok": True,
+            "source_sha256": source_hash,
+            "image_size": [120, 100],
+            "cut": {
+                "ok": True,
+                "stable_count": group["multiplicity"],
+                "minimum_samples": 3,
+                "counts": [group["multiplicity"]] * 3,
+            },
+        }), encoding="utf-8")
+    graph_artifact_report = validate_graph_probe_artifacts(
+        artifact_graph, args.out, graph_source_path
+    )
+    graph_svg_path = args.out / "measured-multigraph.svg"
+    comparison_report_path = args.out / "graph-source-comparison.json"
+    comparison_report_path.write_text(json.dumps({
+        "ok": True,
+        "source_sha256": source_hash,
+        "redraw_sha256": hashlib.sha256(graph_svg_path.read_bytes()).hexdigest(),
+        "artifact_sha256": inspection_hash,
+    }), encoding="utf-8")
+    artifact_graph["source"] = {"file": graph_source_path.name}
+    artifact_graph["verification_evidence"] = {
+        "kind": "independent-measurement",
+        "description": "Ring degrees and midpoint cuts constrain every edge multiplicity.",
+    }
+    artifact_graph["source_comparison"] = {
+        "artifact": graph_inspection_path.name,
+        "report": comparison_report_path.name,
+        "text_match": True,
+        "topology_match": True,
+        "line_styles_match": True,
+        "labels_match": True,
+        "dimensions_match": True,
+        "projection_match": True,
+        "inspected_latest_render": True,
+    }
+    artifact_manifest_path = args.out / "measured-multigraph-real-source.json"
+    artifact_manifest_path.write_text(
+        json.dumps(artifact_graph, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    full_graph_manifest_report = validate_manifest(artifact_graph)
+    full_graph_artifact_report = validate_artifact_evidence(
+        artifact_graph, artifact_manifest_path, graph_svg_path
+    )
+    stale_graph = json.loads(json.dumps(artifact_graph))
+    stale_graph["graph_evidence"]["source_sha256"] = "f" * 64
+    stale_graph_report = validate_graph_probe_artifacts(stale_graph, args.out, graph_source_path)
+    tampered_graph = json.loads(json.dumps(artifact_graph))
+    tampered_path = args.out / "tampered-K-degree.json"
+    tampered_graph["graph_evidence"]["vertices"]["K"]["probe_report"] = tampered_path.name
+    tampered_path.write_text(json.dumps({
+        "ok": True,
+        "source_sha256": source_hash,
+        "image_size": [120, 100],
+        "degree": {
+            "ok": True,
+            "stable_count": 5,
+            "minimum_samples": 3,
+            "counts": [2, 2, 2],
+        },
+    }), encoding="utf-8")
+    tampered_graph_report = validate_graph_probe_artifacts(
+        tampered_graph, args.out, graph_source_path
     )
     negative_gates = {
         "missing_required_segment_rejected": not missing_segment_report["ok"],
@@ -206,20 +431,40 @@ def main() -> int:
         "missing_trace_evidence_rejected": not missing_trace_report["ok"],
         "idealized_projection_rejected": not idealized_trace_report["ok"],
         "inflated_trace_tolerance_rejected": not inflated_tolerance_report["ok"],
+        "self_referential_expectation_rejected": not self_referential["ok"],
+        "undercounted_multigraph_rejected": bool(undercounted_graph_report and not undercounted_graph_report["ok"]),
+        "incomplete_degree_evidence_rejected": bool(incomplete_degrees_report and not incomplete_degrees_report["ok"]),
+        "reused_drawn_edge_rejected": bool(reused_drawn_report and not reused_drawn_report["ok"]),
+        "stale_graph_evidence_rejected": not stale_graph_report["ok"],
+        "self_declared_probe_result_rejected": not tampered_graph_report["ok"],
         "clipped_svg_rejected": not clipped_svg_report["ok"],
         "unmatched_final_figure_rejected": not bad_delivery_report["ok"],
+    }
+
+    positive_gates = {
+        "defs_pattern_ignored_for_ink_bounds": defs_pattern_report["ok"],
+        "ring_degree_probe": ring_probe_ok,
+        "midpoint_cut_probe": cut_probe_ok,
+        "measurement_stability_gate": stability_probe_ok,
+        "imgprobe_cli_json_reports": imgprobe_cli_ok,
+        "current_graph_probe_artifacts": graph_artifact_report["ok"],
+        "full_real_source_graph_gate": (
+            full_graph_manifest_report["ok"] and full_graph_artifact_report["ok"]
+        ),
     }
 
     all_ok = (
         all(report["ok"] for report in reports.values())
         and delivery_report["ok"]
         and all(negative_gates.values())
+        and all(positive_gates.values())
     )
     output = {
         "ok": all_ok,
         "cases": reports,
         "delivery_gate": delivery_report,
         "negative_gates": negative_gates,
+        "positive_gates": positive_gates,
         "contact_sheet": str(sheet_path),
     }
     (args.out / "selftest-report.json").write_text(

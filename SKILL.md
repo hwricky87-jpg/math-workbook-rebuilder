@@ -18,14 +18,14 @@ Create a faithful, pleasant worksheet without changing the mathematical problem.
 ## Required workflow
 
 1. Inventory the source images in filename order. Create one manifest entry per problem before layout. Read [workflow.md](references/workflow.md).
-2. Transcribe the text and separately crop each diagram. Produce grayscale, contrast, and threshold inspection variants with `scripts/preprocess_geometry.py`; use `scripts/imgprobe.py` for line counts and solid/dashed/stroke evidence.
+2. Transcribe the text and separately crop each diagram. Produce grayscale, contrast, and threshold inspection variants with `scripts/preprocess_geometry.py`; use `scripts/imgprobe.py` for line counts, solid/dashed/stroke evidence, and stable ring/cut measurements for multigraphs. If native pixels cannot support a stable measurement, record the pixel evidence and request a better source instead of treating enlargement as new information.
 3. Read the problem and infer what every required point, segment, face, route, dimension, and hidden edge must represent. For every `trace` figure, record every vertex first in source-crop pixel coordinates under `trace_evidence`; do not begin from a regularized or symmetric SVG. Record that structure before drawing. Read [methods.md](references/methods.md) for the combined reconstruction and verification method.
 4. Select the renderer:
    - Use the installed `geometry-dsl` skill when available for plane geometry based on points, lines, circles, arcs, intersections, perpendiculars, and regions. If it is unavailable, use `scripts/geometry_svg.py` for supported diagrams and do not invent unsupported constructions.
    - Use `scripts/geometry_svg.py` for coordinate-traced workbook diagrams, prisms, nets, lattices, routes, and irregular textbook projections.
    - Use a narrowly cleaned source crop only after recording why vector reconstruction is unsafe.
 5. Draw topology first, then line style, then fills, labels, and dimensions. Read [geometry-redraw.md](references/geometry-redraw.md) for all nontrivial figures.
-6. Validate the manifest and SVG with `scripts/validate_geometry.py`. Reconstruct enough mathematics to solve or independently check the problem. A non-clean result or disagreement with a reliable handwritten answer is a reconstruction failure, not evidence that the source is defective.
+6. Validate the manifest and SVG with `scripts/validate_geometry.py`. Record `verification_evidence` whose provenance is outside the values being reconstructed: an external answer, independent invariant, independent measurement, or explicit user confirmation. A tidy result calculated from the same reading is only a plausibility hint, never an expectation gate. Treat handwriting as evidence only after its reliability is established. For multigraphs, require current-source probe reports, complete measured degrees, edge-cut multiplicities, the handshake invariant, and a one-to-one count of drawn strands.
 7. Build a source-comparison proof before final pagination. Run `compare_geometry.py` with both `--manifest` and `--report`. For every problem, compare the original crop with the latest transcription and the latest rendered diagram. For trace figures, require the normalized source-landmark error to pass before any manual comparison field may be set to true. Inspect SOURCE / REDRAW / OVERLAY evidence at readable zoom and record all comparison fields in the manifest. Missing, stale, self-declared, or numerically failing comparison evidence is a hard failure.
 8. Lay out the verified problems using `assets/worksheet.css`. Keep generous writing space and a calm appearance, but add no new wording.
 9. Render and inspect every final PDF page. Then reopen the original problem crops and perform one final problem-by-problem source-to-PDF comparison. Record the evidence in `work/qa/delivery.json` and require `scripts/validate_delivery.py` to pass. Read [quality-gates.md](references/quality-gates.md). Verify clipping, missing lines, pagination, text fidelity, unwanted raster images, and handwriting removal.
@@ -40,6 +40,8 @@ A diagram is complete only when all of these are true:
 - Solid, dashed, emphasized, and construction lines have the correct roles.
 - Labels and dimensions are anchored to the intended vertex, edge, face, or route.
 - Prism and net topology checks pass where applicable.
+- Multigraph degree, cut-count, handshake, and drawn-strand checks pass where applicable.
+- Every claimed semantic or numerical verification records non-self-referential provenance under `verification_evidence`.
 - The SVG has safe ink margins and no clipping.
 - A rendered image from the latest source has been visually inspected against the original crop.
 - The manifest records a completed source comparison and links both its comparison artifact and machine-readable report; hashes prove that both use the current crop and SVG.
@@ -54,6 +56,8 @@ Recorded failure classes and the deterministic gates added for them are document
 ```powershell
 python <skill>/scripts/preprocess_geometry.py source.jpg --box x0 y0 x1 y1 --out inspection
 python <skill>/scripts/imgprobe.py source.jpg --seg x0 y0 x1 y1
+python <skill>/scripts/imgprobe.py graph-crop.png --deg x y --radii r1 r2 r3 r4 --report vertex-degree.json
+python <skill>/scripts/imgprobe.py graph-crop.png --cut x0 y0 x1 y1 --half-lengths h1 h2 h3 h4 --report edge-cut.json
 python <skill>/scripts/geometry_svg.py case.json case.svg
 python <skill>/scripts/compare_geometry.py source-crop.png case.svg --manifest case.json --out comparison.png --report comparison.json
 python <skill>/scripts/validate_geometry.py --manifest case.json --svg case.svg

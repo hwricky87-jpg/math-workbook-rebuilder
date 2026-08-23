@@ -15,10 +15,190 @@ from typing import Any
 from PIL import Image
 
 from geometry_svg import _resolved_face, _resolve_point, net_report
+from imgprobe import stability_report
 
 
 NUMBER = r"-?\d+(?:\.\d+)?"
 MAX_TRACE_NORMALIZED_ERROR = 0.04
+ALLOWED_VERIFICATION_KINDS = {
+    "external-answer",
+    "independent-invariant",
+    "independent-measurement",
+    "user-confirmation",
+}
+
+
+def verification_report(manifest: dict[str, Any], fixture: bool = False) -> dict[str, Any]:
+    """Require provenance for any claimed semantic or numerical cross-check."""
+    evidence = manifest.get("verification_evidence")
+    if evidence is None and fixture:
+        return {"ok": True, "errors": [], "kind": "synthetic-fixture"}
+    if not isinstance(evidence, dict):
+        return {
+            "ok": False,
+            "errors": ["verification_evidence is required for a real source"],
+            "kind": None,
+        }
+
+    errors: list[str] = []
+    kind = str(evidence.get("kind", ""))
+    if kind not in ALLOWED_VERIFICATION_KINDS:
+        errors.append(
+            "verification_evidence.kind must be external-answer, independent-invariant, "
+            "independent-measurement, or user-confirmation"
+        )
+    if not str(evidence.get("description", "")).strip():
+        errors.append("verification_evidence.description is required")
+
+    if kind == "external-answer":
+        if "value" not in evidence:
+            errors.append("external-answer verification requires value")
+        if not evidence.get("artifact"):
+            errors.append("external-answer verification requires an artifact")
+        if not evidence.get("artifact_sha256"):
+            errors.append("external-answer verification requires artifact_sha256")
+    elif kind == "independent-invariant":
+        if not evidence.get("invariant"):
+            errors.append("independent-invariant verification requires invariant")
+        if "observed" not in evidence:
+            errors.append("independent-invariant verification requires observed")
+    elif kind == "independent-measurement":
+        if not manifest.get("graph_evidence") and not evidence.get("artifact"):
+            errors.append(
+                "independent-measurement verification requires graph_evidence or an artifact"
+            )
+    elif kind == "user-confirmation":
+        if not evidence.get("artifact"):
+            errors.append("user-confirmation verification requires a comparison artifact")
+        if not evidence.get("artifact_sha256"):
+            errors.append("user-confirmation verification requires artifact_sha256")
+
+    return {"ok": not errors, "errors": errors, "kind": kind}
+
+
+def graph_structure(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate multigraph multiplicities against independently measured vertex degrees."""
+    evidence = manifest.get("graph_evidence")
+    if evidence is None:
+        return None
+    if not isinstance(evidence, dict):
+        return {"ok": False, "errors": ["graph_evidence must be an object"]}
+
+    errors: list[str] = []
+    if not evidence.get("method"):
+        errors.append("graph_evidence.method is required")
+    if not evidence.get("inspection_artifact"):
+        errors.append("graph_evidence.inspection_artifact is required")
+    if not evidence.get("source_sha256"):
+        errors.append("graph_evidence.source_sha256 is required")
+    if not evidence.get("inspection_sha256"):
+        errors.append("graph_evidence.inspection_sha256 is required")
+    source_size = evidence.get("source_size")
+    if (
+        not isinstance(source_size, (list, tuple)) or len(source_size) != 2
+        or any(not isinstance(value, (int, float)) or value <= 0 for value in source_size)
+    ):
+        errors.append("graph_evidence.source_size must be two positive numbers")
+
+    vertices = evidence.get("vertices")
+    if not isinstance(vertices, dict) or not vertices:
+        errors.append("graph_evidence.vertices must be a non-empty object")
+        vertices = {}
+    observed_degrees: dict[str, int] = {}
+    for raw_name, record in vertices.items():
+        name = str(raw_name)
+        if not isinstance(record, dict):
+            errors.append(f"graph vertex evidence must be an object: {name}")
+            continue
+        degree = record.get("degree")
+        if isinstance(degree, bool) or not isinstance(degree, int) or degree < 0:
+            errors.append(f"graph vertex degree must be a non-negative integer: {name}")
+        else:
+            observed_degrees[name] = degree
+        if not record.get("probe_report"):
+            errors.append(f"graph vertex probe_report is required: {name}")
+
+    drawable_names = {
+        str(item.get("name"))
+        for item in [*manifest.get("segments", []), *manifest.get("curves", [])]
+        if isinstance(item, dict) and item.get("name")
+    }
+    groups = evidence.get("edge_groups")
+    if not isinstance(groups, list) or not groups:
+        errors.append("graph_evidence.edge_groups must be a non-empty list")
+        groups = []
+    computed_degrees = {name: 0 for name in vertices}
+    seen_pairs: set[tuple[str, str]] = set()
+    seen_drawn: set[str] = set()
+    edge_total = 0
+    for index, group in enumerate(groups):
+        if not isinstance(group, dict):
+            errors.append(f"graph edge group {index} must be an object")
+            continue
+        endpoints = group.get("vertices")
+        if not isinstance(endpoints, (list, tuple)) or len(endpoints) != 2:
+            errors.append(f"graph edge group {index} requires two vertices")
+            continue
+        left, right = str(endpoints[0]), str(endpoints[1])
+        if left == right:
+            errors.append(f"graph edge group {index} cannot be a loop")
+        for vertex in (left, right):
+            if vertex not in vertices:
+                errors.append(f"graph edge group {index} uses unknown vertex: {vertex}")
+        pair = tuple(sorted((left, right)))
+        if pair in seen_pairs:
+            errors.append(f"graph edge pair is declared more than once: {left}-{right}")
+        seen_pairs.add(pair)
+
+        multiplicity = group.get("multiplicity")
+        if isinstance(multiplicity, bool) or not isinstance(multiplicity, int) or multiplicity <= 0:
+            errors.append(f"graph edge multiplicity must be a positive integer: {left}-{right}")
+            multiplicity_value = 0
+        else:
+            multiplicity_value = multiplicity
+            edge_total += multiplicity
+            if left in computed_degrees:
+                computed_degrees[left] += multiplicity
+            if right in computed_degrees:
+                computed_degrees[right] += multiplicity
+
+        drawn = group.get("drawn_elements")
+        if not isinstance(drawn, list) or len(drawn) != multiplicity_value:
+            errors.append(
+                f"graph drawn element count must equal multiplicity for {left}-{right}"
+            )
+            drawn = [] if not isinstance(drawn, list) else drawn
+        for raw_element in drawn:
+            element = str(raw_element)
+            if element in seen_drawn:
+                errors.append(f"graph drawn element is reused: {element}")
+            seen_drawn.add(element)
+            if element not in drawable_names:
+                errors.append(f"graph drawn element does not exist in SVG manifest: {element}")
+        if not group.get("probe_report"):
+            errors.append(f"graph edge probe_report is required: {left}-{right}")
+
+    for vertex in sorted(vertices):
+        if vertex not in observed_degrees:
+            continue
+        if computed_degrees.get(vertex, 0) != observed_degrees[vertex]:
+            errors.append(
+                f"graph degree mismatch for {vertex}: edges={computed_degrees.get(vertex, 0)}, "
+                f"measured={observed_degrees[vertex]}"
+            )
+    measured_sum = sum(observed_degrees.values())
+    if len(observed_degrees) == len(vertices) and measured_sum != 2 * edge_total:
+        errors.append(
+            f"graph handshake invariant failed: degree_sum={measured_sum}, edges={edge_total}"
+        )
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "measured_degrees": observed_degrees,
+        "computed_degrees": computed_degrees,
+        "edge_total": edge_total,
+    }
 
 
 def trace_alignment(manifest: dict[str, Any]) -> dict[str, Any] | None:
@@ -146,6 +326,101 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _read_json(path: Path, label: str, errors: list[str]) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"{label} is unreadable: {exc}")
+        return None
+
+
+def validate_graph_probe_artifacts(
+    manifest: dict[str, Any], base: Path, source_path: Path | None
+) -> dict[str, Any]:
+    """Verify that graph measurements came from the current crop and passed stability gates."""
+    evidence = manifest.get("graph_evidence")
+    if not isinstance(evidence, dict):
+        return {"ok": True, "errors": []}
+
+    errors: list[str] = []
+    if source_path is None or not source_path.is_file():
+        return {"ok": False, "errors": ["graph evidence requires an existing source crop"]}
+    source_hash = _sha256(source_path)
+    try:
+        with Image.open(source_path) as image:
+            source_size = list(image.size)
+    except OSError as exc:
+        return {"ok": False, "errors": [f"graph source crop is unreadable: {exc}"]}
+    if evidence.get("source_sha256") != source_hash:
+        errors.append("graph_evidence.source_sha256 is stale for the current source crop")
+    try:
+        recorded_size = [int(value) for value in evidence.get("source_size", [])]
+    except (TypeError, ValueError):
+        recorded_size = []
+    if recorded_size != source_size:
+        errors.append(
+            f"graph source_size={recorded_size} does not match actual crop size={source_size}"
+        )
+
+    inspection_path = _resolve_artifact(base, evidence.get("inspection_artifact"))
+    if inspection_path is None or not inspection_path.is_file():
+        errors.append("graph inspection artifact does not exist")
+    elif evidence.get("inspection_sha256") != _sha256(inspection_path):
+        errors.append("graph inspection artifact hash is stale")
+
+    def check_probe(path_value: Any, expected: int, field: str, label: str) -> None:
+        report_path = _resolve_artifact(base, path_value)
+        if report_path is None or not report_path.is_file():
+            errors.append(f"{label} probe report does not exist")
+            return
+        report = _read_json(report_path, f"{label} probe report", errors)
+        if not isinstance(report, dict):
+            return
+        if report.get("ok") is not True:
+            errors.append(f"{label} probe report did not pass")
+        if report.get("source_sha256") != source_hash:
+            errors.append(f"{label} probe report is stale for the current source crop")
+        if report.get("image_size") != source_size:
+            errors.append(f"{label} probe report image_size does not match the source crop")
+        measurement = report.get(field)
+        if not isinstance(measurement, dict):
+            errors.append(f"{label} probe report lacks a {field} measurement")
+            return
+        counts = measurement.get("counts")
+        minimum_samples = measurement.get("minimum_samples")
+        if (
+            not isinstance(counts, list) or not counts
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in counts)
+            or isinstance(minimum_samples, bool) or not isinstance(minimum_samples, int)
+            or minimum_samples < 2
+        ):
+            errors.append(f"{label} probe report lacks raw counts and a valid stability threshold")
+            return
+        recomputed = stability_report(counts, minimum_samples)
+        if recomputed["ok"] is not True:
+            errors.append(f"{label} probe raw counts have no unique stable {field} value")
+        if measurement.get("ok") != recomputed["ok"]:
+            errors.append(f"{label} probe reported status does not match recomputed stability")
+        if measurement.get("stable_count") != recomputed["stable_count"]:
+            errors.append(f"{label} probe stable_count does not match its raw counts")
+        if recomputed["stable_count"] != expected:
+            errors.append(
+                f"{label} probe stable count={recomputed['stable_count']}, expected={expected}"
+            )
+
+    for name, record in evidence.get("vertices", {}).items():
+        if isinstance(record, dict) and isinstance(record.get("degree"), int):
+            check_probe(record.get("probe_report"), record["degree"], "degree", f"vertex {name}")
+    for group in evidence.get("edge_groups", []):
+        if not isinstance(group, dict) or not isinstance(group.get("multiplicity"), int):
+            continue
+        endpoints = group.get("vertices", ["?", "?"])
+        label = f"edge {'-'.join(map(str, endpoints))}"
+        check_probe(group.get("probe_report"), group["multiplicity"], "cut", label)
+
+    return {"ok": not errors, "errors": errors}
+
+
 def validate_artifact_evidence(
     manifest: dict[str, Any], manifest_path: Path, svg_path: Path | None = None
 ) -> dict[str, Any]:
@@ -162,9 +437,13 @@ def validate_artifact_evidence(
         errors.append("source crop file does not exist")
 
     trace = manifest.get("trace_evidence")
-    inspection_path = _resolve_artifact(base, trace.get("inspection_artifact")) if isinstance(trace, dict) else None
-    if inspection_path is None or not inspection_path.is_file():
-        errors.append("trace inspection artifact does not exist")
+    if manifest.get("type", "trace") == "trace":
+        inspection_path = (
+            _resolve_artifact(base, trace.get("inspection_artifact"))
+            if isinstance(trace, dict) else None
+        )
+        if inspection_path is None or not inspection_path.is_file():
+            errors.append("trace inspection artifact does not exist")
 
     comparison = manifest.get("source_comparison", {})
     artifact_path = _resolve_artifact(base, comparison.get("artifact"))
@@ -175,11 +454,7 @@ def validate_artifact_evidence(
         errors.append("source comparison report does not exist")
         report = None
     else:
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            report = None
-            errors.append(f"source comparison report is unreadable: {exc}")
+        report = _read_json(report_path, "source comparison report", errors)
 
     if source_path and source_path.is_file() and isinstance(trace, dict):
         try:
@@ -207,6 +482,19 @@ def validate_artifact_evidence(
             errors.append("source comparison report is stale for the current SVG")
         if artifact_path and artifact_path.is_file() and report.get("artifact_sha256") != _sha256(artifact_path):
             errors.append("source comparison artifact hash does not match its report")
+
+    verification = manifest.get("verification_evidence")
+    if isinstance(verification, dict) and verification.get("kind") in {
+        "external-answer", "user-confirmation"
+    }:
+        verification_path = _resolve_artifact(base, verification.get("artifact"))
+        if verification_path is None or not verification_path.is_file():
+            errors.append("verification evidence artifact does not exist")
+        elif verification.get("artifact_sha256") != _sha256(verification_path):
+            errors.append("verification evidence artifact hash is stale")
+
+    graph_artifacts = validate_graph_probe_artifacts(manifest, base, source_path)
+    errors.extend(graph_artifacts["errors"])
 
     return {"ok": not errors, "errors": errors}
 
@@ -399,6 +687,13 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 if comparison.get(field) is not True:
                     errors.append(f"source_comparison.{field} must be true")
 
+    verification = verification_report(manifest, fixture)
+    errors.extend(verification["errors"])
+
+    graph = graph_structure(manifest)
+    if graph:
+        errors.extend(graph["errors"])
+
     trace = trace_alignment(manifest)
     if trace:
         errors.extend(trace["errors"])
@@ -408,7 +703,9 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "errors": errors,
         "warnings": warnings,
         "net": net,
+        "graph": graph,
         "trace": trace,
+        "verification": verification,
     }
 
 
@@ -418,24 +715,33 @@ def svg_fit(svg: str, min_margin: float = 1.5) -> dict[str, Any]:
     if not view:
         return {"ok": False, "errors": ["SVG has no numeric viewBox"]}
     vx, vy, vw, vh = map(float, view.groups())
+    # Definitions are not painted at their declaration coordinates. Counting pattern,
+    # clipPath, or marker geometry as visible ink creates false clipping failures.
+    visible_svg = re.sub(r"<defs\b[^>]*>.*?</defs>", "", svg, flags=re.I | re.S)
     xs: list[float] = []
     ys: list[float] = []
 
     for match in re.finditer(
-        rf'<line[^>]*x1="({NUMBER})" y1="({NUMBER})" x2="({NUMBER})" y2="({NUMBER})"', svg
+        rf'<line[^>]*x1="({NUMBER})" y1="({NUMBER})" x2="({NUMBER})" y2="({NUMBER})"', visible_svg
     ):
         x1, y1, x2, y2 = map(float, match.groups())
         xs.extend((x1, x2)); ys.extend((y1, y2))
-    for match in re.finditer(r'points="([^"]+)"', svg):
+    for match in re.finditer(r'points="([^"]+)"', visible_svg):
         for x, y in re.findall(rf'({NUMBER}),({NUMBER})', match.group(1)):
             xs.append(float(x)); ys.append(float(y))
-    for match in re.finditer(rf'<circle[^>]*cx="({NUMBER})" cy="({NUMBER})" r="({NUMBER})"', svg):
+    for match in re.finditer(rf'<circle[^>]*cx="({NUMBER})" cy="({NUMBER})" r="({NUMBER})"', visible_svg):
         cx, cy, radius = map(float, match.groups())
         xs.extend((cx - radius, cx + radius)); ys.extend((cy - radius, cy + radius))
-    for match in re.finditer(r'<path[^>]*d="([^"]+)"', svg):
+    for match in re.finditer(
+        rf'<rect[^>]*x="({NUMBER})" y="({NUMBER})" width="({NUMBER})" height="({NUMBER})"',
+        visible_svg,
+    ):
+        x, y, width, height = map(float, match.groups())
+        xs.extend((x, x + width)); ys.extend((y, y + height))
+    for match in re.finditer(r'<path[^>]*d="([^"]+)"', visible_svg):
         for x, y in _path_points(match.group(1)):
             xs.append(x); ys.append(y)
-    for match in re.finditer(r'<text([^>]*)>(.*?)</text>', svg, re.S):
+    for match in re.finditer(r'<text([^>]*)>(.*?)</text>', visible_svg, re.S):
         attributes, raw_content = match.group(1), match.group(2)
         x_match = re.search(rf'\bx="({NUMBER})"', attributes)
         y_match = re.search(rf'\by="({NUMBER})"', attributes)

@@ -40,6 +40,57 @@
 - 최대 정규화 오차는 `0.04`를 넘을 수 없고, 일반적인 목표는 `0.02`–`0.03`이다.
 - 임계값을 키워 실패를 통과시키지 않는다. 오차가 크면 원본 좌표 판독 또는 SVG 투영으로 돌아간다.
 
+## 다중간선 그래프
+
+붙어 있는 가닥을 확대 화면에서 한 번 세는 것으로 다중도를 확정하지 않는다. 꼭짓점 주변 원형 측정과 간선 다발 중점의 수직 절단 측정을 서로 다른 증거로 남긴다.
+
+```powershell
+python <skill>/scripts/imgprobe.py graph-crop.png --deg 120 85 `
+  --radii 14 18 22 26 30 --stable-samples 3 --report K-degree.json
+python <skill>/scripts/imgprobe.py graph-crop.png --cut 120 85 210 150 `
+  --half-lengths 8 12 16 20 24 --stable-samples 3 --report K-N-cut.json
+```
+
+위 수치는 예시일 뿐이다. 실제 반지름과 절단 길이는 원본의 native pixel 크기와 다른 선·라벨이 끼어드는 위치를 보고 명시한다. 하나의 개수가 필요한 연속 표본 수만큼 유지되지 않거나 서로 다른 안정값이 둘 이상 나오면 프로브는 실패한다.
+
+manifest에는 다음처럼 현재 원본과 실제 SVG 가닥을 연결한다.
+
+```json
+{
+  "type": "graph",
+  "verification_evidence": {
+    "kind": "independent-measurement",
+    "description": "Ring degrees and midpoint cuts independently constrain edge multiplicities."
+  },
+  "graph_evidence": {
+    "method": "ring degree plus midpoint cut",
+    "inspection_artifact": "../inspection/graph-sheet.png",
+    "source_size": [1200, 900],
+    "source_sha256": "...",
+    "inspection_sha256": "...",
+    "vertices": {
+      "K": {"degree": 5, "probe_report": "../inspection/K-degree.json"},
+      "N": {"degree": 6, "probe_report": "../inspection/N-degree.json"}
+    },
+    "edge_groups": [
+      {
+        "vertices": ["K", "N"],
+        "multiplicity": 3,
+        "drawn_elements": ["KN-1", "KN-2", "KN-3"],
+        "probe_report": "../inspection/K-N-cut.json"
+      }
+    ]
+  }
+}
+```
+
+- 모든 그래프 꼭짓점에 실측 차수와 통과한 degree 프로브 보고서가 있어야 한다.
+- 모든 간선 다발에 실측 다중도, 같은 수의 `drawn_elements`, 통과한 cut 프로브 보고서가 있어야 한다.
+- 무방향 꼭짓점 쌍은 한 번만 선언하고 루프는 허용하지 않는다.
+- 간선에서 계산한 차수와 실측 차수, 차수 합 `2|E|`, 실제 SVG 요소 이름이 모두 맞아야 한다.
+- 프로브 원본 해시, 이미지 크기, 검사 이미지 해시가 현재 파일과 다르면 오래된 증거로 거부한다.
+- 프로브가 적어 둔 `ok`나 `stable_count`를 신뢰하지 않고 원시 `counts`와 `minimum_samples`에서 안정값을 다시 계산한다.
+
 ## 파라미터 각기둥
 
 규칙적인 정n각기둥에는 `geometry_svg.prism()`을 쓸 수 있다.
@@ -80,12 +131,18 @@ n각기둥 전개도의 기본 불변식:
 
 라벨은 자유 좌표가 아니라 `vertex`, `edge midpoint`, `face centroid`, `route point` 중 하나에 오프셋을 둬 배치한다. 치수 텍스트도 측정 대상 선분과 연결된 보조선을 가져야 한다.
 
+원본 면이 망점이면 인쇄·축소 후에도 보이는 SVG `<pattern>`으로 재현한다. 원본이 단색이면 망점을 추가하지 않는다. `<defs>` 안의 pattern·clipPath·marker 좌표는 선언일 뿐 실제 잉크 위치가 아니므로 잘림 계산에서 제외한다.
+
+## 해상도 한계
+
+화면 확대는 기존 픽셀을 크게 보일 뿐 새 구조 정보를 만들지 않는다. 선 간격, 격자 간격, 획 굵기, 측정값이 안정되지 않은 매개변수 범위를 native pixel 단위로 기록한다. 서로 다른 대비·임계값·반지름·절단 길이에서 구조가 확정되지 않으면 임의로 고르지 말고 숫자 근거와 함께 더 높은 해상도의 원본을 요청한다.
+
 ## 의미 검산
 
-완성 그림을 이용해 문제를 직접 풀어 본다.
+완성 그림을 이용해 문제를 직접 풀어 보되, 그 결과는 독립 근거가 있을 때만 기대값 게이트가 된다.
 
-- 답이 흔한 교재 수치로 깔끔하게 떨어지는가.
-- 신뢰할 수 있는 손글씨 답과 일치하는가.
+- 답이 흔한 교재 수치로 깔끔하게 떨어지는지는 개연성 신호로만 사용한다.
+- 채점·해설·독립 계산으로 신뢰성이 확인된 외부 답과 일치하는가.
 - 문제에서 언급한 모든 기호가 그림에 존재하는가.
 - 경로 길이, 면 개수, 모서리 수를 그림의 실제 구조에서 계산할 수 있는가.
 
