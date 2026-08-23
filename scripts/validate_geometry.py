@@ -26,6 +26,7 @@ ALLOWED_VERIFICATION_KINDS = {
     "independent-measurement",
     "user-confirmation",
 }
+ALLOWED_SEGMENT_STYLES = {"solid", "dashed", "guide", "emphasis"}
 
 
 def verification_report(manifest: dict[str, Any], fixture: bool = False) -> dict[str, Any]:
@@ -311,6 +312,49 @@ def trace_alignment(manifest: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def segment_topology(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Reject zero-length and duplicate undirected trace segments."""
+    errors: list[str] = []
+    points = {
+        name: _resolve_point(value, {}) for name, value in manifest.get("points", {}).items()
+    }
+    seen: dict[tuple[Any, Any], tuple[str, str]] = {}
+    for index, segment in enumerate(manifest.get("segments", [])):
+        if not isinstance(segment, dict):
+            errors.append(f"segment {index} must be an object")
+            continue
+        name = str(segment.get("name") or f"segment-{index}")
+        style = str(segment.get("style", "solid"))
+        if style not in ALLOWED_SEGMENT_STYLES:
+            errors.append(f"segment {name} has unsupported style: {style}")
+        raw_left, raw_right = segment.get("from"), segment.get("to")
+        if isinstance(raw_left, str) and isinstance(raw_right, str):
+            if raw_left == raw_right:
+                errors.append(f"segment {name} has zero length")
+                continue
+            endpoints = tuple(sorted((("name", raw_left), ("name", raw_right))))
+        else:
+            try:
+                left = _resolve_point(raw_left, points)
+                right = _resolve_point(raw_right, points)
+            except (KeyError, TypeError, ValueError) as exc:
+                errors.append(f"segment {name} has invalid endpoints: {exc}")
+                continue
+            if math.dist(left, right) <= 1e-9:
+                errors.append(f"segment {name} has zero length")
+                continue
+            endpoints = tuple(sorted((("point", left), ("point", right))))
+        if endpoints in seen:
+            previous_name, previous_style = seen[endpoints]
+            errors.append(
+                f"duplicate segment endpoints: {previous_name} ({previous_style}) and "
+                f"{name} ({style})"
+            )
+        else:
+            seen[endpoints] = (name, style)
+    return {"ok": not errors, "errors": errors, "unique_segments": len(seen)}
+
+
 def _resolve_artifact(base: Path, value: Any) -> Path | None:
     if not value:
         return None
@@ -445,6 +489,58 @@ def validate_artifact_evidence(
         if inspection_path is None or not inspection_path.is_file():
             errors.append("trace inspection artifact does not exist")
 
+        observation_path = (
+            _resolve_artifact(base, trace.get("observation_artifact"))
+            if isinstance(trace, dict) else None
+        )
+        if observation_path is None or not observation_path.is_file():
+            errors.append("trace observation artifact does not exist")
+            observation = None
+        else:
+            if observation_path.resolve() == manifest_path.resolve():
+                errors.append("trace observation artifact must be separate from the manifest")
+            if trace.get("observation_sha256") != _sha256(observation_path):
+                errors.append("trace observation artifact hash is stale")
+            observation = _read_json(observation_path, "trace observation artifact", errors)
+        if isinstance(observation, dict):
+            if source_path and source_path.is_file() and observation.get("source_sha256") != _sha256(source_path):
+                errors.append("trace observation artifact is stale for the current source crop")
+            try:
+                observation_size = [int(value) for value in observation.get("source_size", [])]
+            except (TypeError, ValueError):
+                observation_size = []
+            if isinstance(trace, dict):
+                try:
+                    trace_size = [int(value) for value in trace.get("source_size", [])]
+                except (TypeError, ValueError):
+                    trace_size = []
+                if observation_size != trace_size:
+                    errors.append("trace observation source_size does not match trace_evidence")
+                if observation.get("points") != trace.get("points"):
+                    errors.append("trace_evidence.points must come unchanged from the observation artifact")
+            observed_segments = observation.get("segments")
+            if not isinstance(observed_segments, list):
+                errors.append("trace observation artifact requires a segments list")
+            else:
+                observed_by_name = {
+                    str(item.get("name")): item for item in observed_segments
+                    if isinstance(item, dict) and item.get("name")
+                }
+                manifest_segments = {
+                    str(item.get("name")): item for item in manifest.get("segments", [])
+                    if isinstance(item, dict) and item.get("name")
+                }
+                if set(observed_by_name) != set(manifest_segments):
+                    errors.append("trace observation segments must match manifest segment names one-to-one")
+                for name in sorted(set(observed_by_name) & set(manifest_segments)):
+                    observed_segment = observed_by_name[name]
+                    drawn_segment = manifest_segments[name]
+                    for field in ("from", "to", "style"):
+                        if observed_segment.get(field) != drawn_segment.get(field):
+                            errors.append(
+                                f"trace observation segment {name}.{field} does not match the manifest"
+                            )
+
     comparison = manifest.get("source_comparison", {})
     artifact_path = _resolve_artifact(base, comparison.get("artifact"))
     report_path = _resolve_artifact(base, comparison.get("report"))
@@ -476,12 +572,54 @@ def validate_artifact_evidence(
             not isinstance(trace_report, dict) or trace_report.get("ok") is not True
         ):
             errors.append("source comparison report lacks a passing trace metric")
+        ink_report = report.get("ink_alignment")
+        if not isinstance(ink_report, dict) or ink_report.get("ok") is not True:
+            errors.append("source comparison report lacks a passing source-ink metric")
+        residual_report = report.get("source_residual")
+        if not isinstance(residual_report, dict) or residual_report.get("ok") is not True:
+            errors.append("source comparison report has an unexplained long source-line residual")
+        segment_support_report = report.get("segment_source_support")
+        if manifest.get("type", "trace") == "trace" and (
+            not isinstance(segment_support_report, dict)
+            or segment_support_report.get("ok") is not True
+            or segment_support_report.get("applied") is not True
+        ):
+            errors.append("source comparison report has an unsupported declared segment")
         if source_path and source_path.is_file() and report.get("source_sha256") != _sha256(source_path):
             errors.append("source comparison report is stale for the current source crop")
         if svg_path and svg_path.is_file() and report.get("redraw_sha256") != _sha256(svg_path):
             errors.append("source comparison report is stale for the current SVG")
         if artifact_path and artifact_path.is_file() and report.get("artifact_sha256") != _sha256(artifact_path):
             errors.append("source comparison artifact hash does not match its report")
+
+    review_path = _resolve_artifact(base, comparison.get("review"))
+    if review_path is None or not review_path.is_file():
+        errors.append("source comparison review artifact does not exist")
+    else:
+        if comparison.get("review_sha256") != _sha256(review_path):
+            errors.append("source comparison review artifact hash is stale")
+        review = _read_json(review_path, "source comparison review artifact", errors)
+        if isinstance(review, dict):
+            if source_path and source_path.is_file() and review.get("source_sha256") != _sha256(source_path):
+                errors.append("source comparison review is stale for the current source crop")
+            if svg_path and svg_path.is_file() and review.get("redraw_sha256") != _sha256(svg_path):
+                errors.append("source comparison review is stale for the current SVG")
+            if artifact_path and artifact_path.is_file() and review.get("artifact_sha256") != _sha256(artifact_path):
+                errors.append("source comparison review is stale for the current comparison artifact")
+            if report_path and report_path.is_file() and review.get("report_sha256") != _sha256(report_path):
+                errors.append("source comparison review is stale for the current comparison report")
+            review_checks = review.get("checks")
+            if not isinstance(review_checks, dict):
+                errors.append("source comparison review requires item-by-item checks")
+            else:
+                for field in (
+                    "text_match", "topology_match", "line_styles_match", "labels_match",
+                    "dimensions_match", "projection_match", "inspected_latest_render",
+                ):
+                    if review_checks.get(field) is not True:
+                        errors.append(f"source comparison review check must be true: {field}")
+                    if comparison.get(field) != review_checks.get(field):
+                        errors.append(f"source_comparison.{field} must match the review artifact")
 
     verification = manifest.get("verification_evidence")
     if isinstance(verification, dict) and verification.get("kind") in {
@@ -609,6 +747,8 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         str(item.get("name")) for item in labels if item.get("name")
     }
     segment_names = {str(item.get("name")) for item in segments if item.get("name")}
+    segment_report = segment_topology(manifest)
+    errors.extend(segment_report["errors"])
 
     for required in manifest.get("required_labels", []):
         if str(required) not in label_names:
@@ -674,6 +814,10 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 errors.append("source_comparison.artifact is required")
             if not comparison.get("report"):
                 errors.append("source_comparison.report is required")
+            if not comparison.get("review"):
+                errors.append("source_comparison.review is required")
+            if not comparison.get("review_sha256"):
+                errors.append("source_comparison.review_sha256 is required")
             required_checks = (
                 "text_match",
                 "topology_match",
@@ -705,6 +849,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "net": net,
         "graph": graph,
         "trace": trace,
+        "segments": segment_report,
         "verification": verification,
     }
 

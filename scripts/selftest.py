@@ -15,6 +15,7 @@ import pymupdf
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from compare_geometry import ink_alignment, residual_line_report, segment_source_support
 from geometry_svg import polygon_on_edge, render_manifest
 from imgprobe import cut_crossings, ring_strands, stability_report
 from validate_delivery import validate_delivery_manifest
@@ -264,6 +265,11 @@ def main() -> int:
     inflated_tolerance = json.loads(json.dumps(trace))
     inflated_tolerance["trace_evidence"]["max_normalized_error"] = 0.25
     inflated_tolerance_report = validate_manifest(inflated_tolerance)
+    duplicate_style_segment = json.loads(json.dumps(trace))
+    duplicate_style_segment["segments"].append({
+        "name": "A-B0-hidden-duplicate", "from": "A", "to": "B0", "style": "dashed"
+    })
+    duplicate_style_segment_report = validate_manifest(duplicate_style_segment)
     undercounted_graph = json.loads(json.dumps(graph))
     undercounted_graph["graph_evidence"]["edge_groups"][0]["multiplicity"] = 2
     undercounted_graph["graph_evidence"]["edge_groups"][0]["drawn_elements"] = ["KN-1", "KN-2"]
@@ -329,12 +335,68 @@ def main() -> int:
         and stability_report([5, 5, 5, 6, 6, 6], 3)["ok"] is False
     )
 
+    ink_source = Image.new("L", (240, 180), 245)
+    ink_source_draw = ImageDraw.Draw(ink_source)
+    ink_source_draw.rectangle((35, 30, 205, 150), outline=20, width=4)
+    ink_redraw_good = Image.new("L", (240, 180), 255)
+    ImageDraw.Draw(ink_redraw_good).rectangle((35, 30, 205, 150), outline=20, width=3)
+    ink_redraw_bad = Image.new("L", (240, 180), 255)
+    ImageDraw.Draw(ink_redraw_bad).rectangle((75, 55, 225, 170), outline=20, width=3)
+    ink_alignment_good = ink_alignment(ink_source, ink_redraw_good, minimum_coverage=0.90)
+    ink_alignment_bad = ink_alignment(ink_source, ink_redraw_bad, minimum_coverage=0.90)
+
+    omission_source = ink_source.copy()
+    ImageDraw.Draw(omission_source).line((35, 30, 205, 150), fill=20, width=4)
+    omission_redraw_missing = ink_redraw_good.copy()
+    omission_redraw_complete = ink_redraw_good.copy()
+    ImageDraw.Draw(omission_redraw_complete).line((35, 30, 205, 150), fill=20, width=3)
+    omission_one_way = ink_alignment(
+        omission_source, omission_redraw_missing, minimum_coverage=0.90
+    )
+    omitted_line_report = residual_line_report(omission_source, omission_redraw_missing)
+    complete_line_report = residual_line_report(omission_source, omission_redraw_complete)
+
+    chord_source = Image.new("L", (240, 180), 245)
+    chord_draw = ImageDraw.Draw(chord_source)
+    chord_draw.line((35, 150, 120, 90), fill=20, width=4)
+    chord_draw.line((120, 90, 35, 30), fill=20, width=4)
+    chord_manifest = {
+        "type": "trace",
+        "segments": [
+            {"name": "A-I", "from": "A", "to": "I", "style": "solid"},
+            {"name": "I-G", "from": "I", "to": "G", "style": "solid"},
+        ],
+        "trace_evidence": {
+            "source_size": [240, 180],
+            "points": {"A": [35, 150], "I": [120, 90], "G": [35, 30]},
+        },
+    }
+    chord_manifest_wrong = json.loads(json.dumps(chord_manifest))
+    chord_manifest_wrong["segments"] = [
+        {"name": "A-G-invented", "from": "A", "to": "G", "style": "solid"}
+    ]
+    segment_support_good = segment_source_support(chord_source, chord_manifest)
+    segment_support_bad = segment_source_support(chord_source, chord_manifest_wrong)
+
     graph_source_path = args.out / "graph-probe-source.png"
     graph_inspection_path = args.out / "graph-probe-inspection.png"
     Image.new("L", (120, 100), 255).save(graph_source_path)
     Image.new("L", (240, 200), 255).save(graph_inspection_path)
     source_hash = hashlib.sha256(graph_source_path.read_bytes()).hexdigest()
     inspection_hash = hashlib.sha256(graph_inspection_path.read_bytes()).hexdigest()
+    trace_without_observation = json.loads(json.dumps(trace))
+    trace_without_observation["source"] = {"file": graph_source_path.name}
+    trace_without_observation["trace_evidence"]["inspection_artifact"] = graph_inspection_path.name
+    trace_without_observation["trace_evidence"]["source_size"] = [120, 100]
+    trace_without_observation["source_comparison"] = {
+        "artifact": graph_inspection_path.name,
+        "report": "missing-trace-comparison.json",
+        "review": "missing-trace-review.json",
+    }
+    trace_without_observation_path = args.out / "trace-without-observation.json"
+    trace_without_observation_report = validate_artifact_evidence(
+        trace_without_observation, trace_without_observation_path, None
+    )
     artifact_graph = json.loads(json.dumps(graph))
     artifact_evidence = artifact_graph["graph_evidence"]
     artifact_evidence["source_size"] = [120, 100]
@@ -380,6 +442,9 @@ def main() -> int:
         "source_sha256": source_hash,
         "redraw_sha256": hashlib.sha256(graph_svg_path.read_bytes()).hexdigest(),
         "artifact_sha256": inspection_hash,
+        "ink_alignment": {"ok": True},
+        "source_residual": {"ok": True},
+        "segment_source_support": {"ok": True, "applied": True},
     }), encoding="utf-8")
     artifact_graph["source"] = {"file": graph_source_path.name}
     artifact_graph["verification_evidence"] = {
@@ -389,6 +454,7 @@ def main() -> int:
     artifact_graph["source_comparison"] = {
         "artifact": graph_inspection_path.name,
         "report": comparison_report_path.name,
+        "review": "graph-source-comparison-review.json",
         "text_match": True,
         "topology_match": True,
         "line_styles_match": True,
@@ -397,6 +463,25 @@ def main() -> int:
         "projection_match": True,
         "inspected_latest_render": True,
     }
+    review_path = args.out / artifact_graph["source_comparison"]["review"]
+    review_path.write_text(json.dumps({
+        "source_sha256": source_hash,
+        "redraw_sha256": hashlib.sha256(graph_svg_path.read_bytes()).hexdigest(),
+        "artifact_sha256": inspection_hash,
+        "report_sha256": hashlib.sha256(comparison_report_path.read_bytes()).hexdigest(),
+        "checks": {
+            "text_match": True,
+            "topology_match": True,
+            "line_styles_match": True,
+            "labels_match": True,
+            "dimensions_match": True,
+            "projection_match": True,
+            "inspected_latest_render": True,
+        },
+    }), encoding="utf-8")
+    artifact_graph["source_comparison"]["review_sha256"] = hashlib.sha256(
+        review_path.read_bytes()
+    ).hexdigest()
     artifact_manifest_path = args.out / "measured-multigraph-real-source.json"
     artifact_manifest_path.write_text(
         json.dumps(artifact_graph, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -431,6 +516,7 @@ def main() -> int:
         "missing_trace_evidence_rejected": not missing_trace_report["ok"],
         "idealized_projection_rejected": not idealized_trace_report["ok"],
         "inflated_trace_tolerance_rejected": not inflated_tolerance_report["ok"],
+        "duplicate_solid_dashed_edge_rejected": not duplicate_style_segment_report["ok"],
         "self_referential_expectation_rejected": not self_referential["ok"],
         "undercounted_multigraph_rejected": bool(undercounted_graph_report and not undercounted_graph_report["ok"]),
         "incomplete_degree_evidence_rejected": bool(incomplete_degrees_report and not incomplete_degrees_report["ok"]),
@@ -439,6 +525,15 @@ def main() -> int:
         "self_declared_probe_result_rejected": not tampered_graph_report["ok"],
         "clipped_svg_rejected": not clipped_svg_report["ok"],
         "unmatched_final_figure_rejected": not bad_delivery_report["ok"],
+        "displaced_redraw_ink_rejected": not ink_alignment_bad["ok"],
+        "omitted_source_line_rejected": (
+            omission_one_way["ok"] and not omitted_line_report["ok"]
+        ),
+        "unsupported_chord_rejected": not segment_support_bad["ok"],
+        "missing_independent_trace_observation_rejected": (
+            "trace observation artifact does not exist"
+            in trace_without_observation_report["errors"]
+        ),
     }
 
     positive_gates = {
@@ -451,6 +546,9 @@ def main() -> int:
         "full_real_source_graph_gate": (
             full_graph_manifest_report["ok"] and full_graph_artifact_report["ok"]
         ),
+        "aligned_redraw_ink_accepted": ink_alignment_good["ok"],
+        "complete_source_line_census_accepted": complete_line_report["ok"],
+        "per_segment_source_support_accepted": segment_support_good["ok"],
     }
 
     all_ok = (

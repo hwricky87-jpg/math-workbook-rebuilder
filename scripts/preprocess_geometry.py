@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Create crop, grayscale, contrast, threshold, and inspection-sheet variants."""
+"""Create deterministic, source-preserving geometry inspection variants."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 
@@ -30,21 +33,41 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     crop = source.crop(box).convert("RGB")
+    native_path = args.out / "source-native.png"
+    crop.save(native_path)
     size = (crop.width * args.scale, crop.height * args.scale)
-    enlarged = crop.resize(size, Image.Resampling.LANCZOS)
-    gray = enlarged.convert("L")
-    contrast = ImageOps.autocontrast(gray, cutoff=2).filter(
-        ImageFilter.UnsharpMask(radius=4, percent=90, threshold=2)
+
+    native_gray = crop.convert("L")
+    gray_array = np.asarray(native_gray, dtype=np.uint8)
+    contrast_native = ImageOps.autocontrast(native_gray, cutoff=2).filter(
+        ImageFilter.UnsharpMask(radius=1.2, percent=90, threshold=2)
     )
-    threshold = gray.point(lambda value: 255 if value > args.threshold else 0)
+    clahe_array = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray_array)
+    denoised_array = cv2.bilateralFilter(clahe_array, 5, 30, 30)
+    blur_array = cv2.GaussianBlur(denoised_array, (0, 0), 1.0)
+    edge_contrast_array = cv2.addWeighted(denoised_array, 1.55, blur_array, -0.55, 0)
+    manual_threshold_array = np.where(gray_array > args.threshold, 255, 0).astype(np.uint8)
+    adaptive_array = cv2.adaptiveThreshold(
+        clahe_array,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        11,
+    )
+
+    def enlarged(image: Image.Image) -> Image.Image:
+        return image.resize(size, Image.Resampling.LANCZOS)
 
     variants = {
-        "crop": enlarged,
-        "gray": gray.convert("RGB"),
-        "contrast": contrast.convert("RGB"),
-        "threshold": threshold.convert("RGB"),
+        "crop": enlarged(crop),
+        "gray": enlarged(native_gray).convert("RGB"),
+        "contrast": enlarged(contrast_native).convert("RGB"),
+        "edge-contrast": enlarged(Image.fromarray(edge_contrast_array)).convert("RGB"),
+        "threshold": enlarged(Image.fromarray(manual_threshold_array)).convert("RGB"),
+        "adaptive-threshold": enlarged(Image.fromarray(adaptive_array)).convert("RGB"),
     }
-    paths: dict[str, str] = {}
+    paths: dict[str, str] = {"source_native": str(native_path)}
     for name, image in variants.items():
         path = args.out / f"{name}.png"
         image.save(path)
@@ -52,7 +75,9 @@ def main() -> int:
 
     panel_width = max(image.width for image in variants.values())
     panel_height = max(image.height for image in variants.values())
-    sheet = Image.new("RGB", (panel_width * 2, (panel_height + 30) * 2), "white")
+    columns = 2
+    rows = math.ceil(len(variants) / columns)
+    sheet = Image.new("RGB", (panel_width * columns, (panel_height + 30) * rows), "white")
     draw = ImageDraw.Draw(sheet)
     for index, (name, image) in enumerate(variants.items()):
         column, row = index % 2, index // 2
@@ -70,6 +95,10 @@ def main() -> int:
         "crop_size": [crop.width, crop.height],
         "scale": args.scale,
         "threshold": args.threshold,
+        "evidence_policy": (
+            "All enhanced images are deterministic reading aids only; accept geometry "
+            "only when supported in source-native.png and keep coordinates in its pixel frame."
+        ),
         "outputs": paths,
     }
     (args.out / "inspection.json").write_text(
