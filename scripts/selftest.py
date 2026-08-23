@@ -19,13 +19,19 @@ from compare_geometry import (
     RedrawEvidence,
     SourceEvidence,
     ink_alignment,
+    rasterize_svg,
     residual_line_report,
     segment_source_support,
     trace_routing_report,
 )
 from geometry_svg import polygon_on_edge, render_manifest
 from imgprobe import cut_crossings, ring_strands, stability_report
-from preprocess_geometry import inspection_size
+from preprocess_geometry import (
+    coordinate_grid,
+    coordinate_grid_step,
+    inspection_size,
+    sheet_preview_size,
+)
 from validate_delivery import validate_delivery_manifest
 from validate_geometry import (
     component_inventory_report,
@@ -230,6 +236,7 @@ def main() -> int:
 
     reports = {}
     rendered = []
+    svg_paths: dict[str, Path] = {}
     for name, manifest in (
         ("pentagonal-prism", prism),
         ("hexagonal-net", net),
@@ -238,6 +245,7 @@ def main() -> int:
         ("print-readability", readability),
     ):
         _, svg_path, report = save_case(args.out, name, manifest)
+        svg_paths[name] = svg_path
         reports[name] = report
         rendered.append((name, rasterize(svg_path)))
 
@@ -416,6 +424,24 @@ def main() -> int:
         radius_ratio=0.04,
     )
 
+    flat_shading_source = Image.new("L", (240, 180), 245)
+    ImageDraw.Draw(flat_shading_source).rectangle((20, 65, 220, 115), fill=160)
+    flat_shading_manifest = {
+        "type": "trace",
+        "segments": [
+            {"name": "flat-shading-is-not-an-edge", "from": "A", "to": "B", "style": "solid"}
+        ],
+        "trace_evidence": {
+            "source_size": [240, 180],
+            "points": {"A": [30, 90], "B": [210, 90]},
+        },
+    }
+    flat_shading_report = segment_source_support(flat_shading_source, flat_shading_manifest)
+
+    faint_line_source = Image.new("L", (240, 180), 245)
+    ImageDraw.Draw(faint_line_source).line((30, 90, 210, 90), fill=190, width=2)
+    faint_line_report = segment_source_support(faint_line_source, flat_shading_manifest)
+
     prepared_source = SourceEvidence.prepare(ink_source)
     prepared_redraw = RedrawEvidence.prepare(ink_redraw_good, ink_source.size)
     cached_ink_alignment = ink_alignment(
@@ -431,6 +457,35 @@ def main() -> int:
         source_evidence=SourceEvidence.prepare(omission_source),
         redraw_evidence=RedrawEvidence.prepare(omission_redraw_complete, omission_source.size),
     )
+    shared_chord_source = SourceEvidence.prepare(chord_source)
+    ink_alignment(
+        chord_source,
+        chord_source,
+        source_evidence=shared_chord_source,
+        redraw_evidence=RedrawEvidence.prepare(chord_source, chord_source.size),
+    )
+    segment_source_support(
+        chord_source,
+        chord_manifest,
+        source_evidence=shared_chord_source,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="geometry-svg-cache-selftest-") as cache_directory:
+        first_cache_stats: dict[str, object] = {}
+        second_cache_stats: dict[str, object] = {}
+        first_cached_raster = rasterize_svg(
+            svg_paths["asymmetric-trace"],
+            cache_dir=Path(cache_directory),
+            cache_stats=first_cache_stats,
+        )
+        second_cached_raster = rasterize_svg(
+            svg_paths["asymmetric-trace"],
+            cache_dir=Path(cache_directory),
+            cache_stats=second_cache_stats,
+        )
+        svg_cache_pixels_equal = np.array_equal(
+            np.asarray(first_cached_raster), np.asarray(second_cached_raster)
+        )
 
     readability_image = dict(rendered)["print-readability"]
     readability_array = np.asarray(readability_image.convert("L"), dtype=np.uint8)
@@ -446,6 +501,13 @@ def main() -> int:
     explicit_size, explicit_scale, explicit_mode = inspection_size(
         1080, 840, explicit_scale=2
     )
+    grid_step = coordinate_grid_step(2.0)
+    grid_image, generated_grid_step = coordinate_grid(
+        Image.new("RGB", (200, 160), "white"),
+        (100, 80),
+        2.0,
+    )
+    preview_size = sheet_preview_size(2200, 1711)
 
     invalid_style_manifest = json.loads(json.dumps(readability))
     invalid_style_manifest["render_style"] = {"solid_width": 0.2}
@@ -675,6 +737,7 @@ def main() -> int:
             omission_one_way["ok"] and not omitted_line_report["ok"]
         ),
         "unsupported_chord_rejected": not segment_support_bad["ok"],
+        "flat_shading_rejected_as_geometry": not flat_shading_report["ok"],
         "invalid_render_style_rejected": invalid_style_rejected,
         "missing_independent_trace_observation_rejected": (
             "trace observation artifact does not exist"
@@ -709,6 +772,7 @@ def main() -> int:
         "aligned_redraw_ink_accepted": ink_alignment_good["ok"],
         "complete_source_line_census_accepted": complete_line_report["ok"],
         "per_segment_source_support_accepted": segment_support_good["ok"],
+        "faint_native_line_accepted_by_oriented_contrast": faint_line_report["ok"],
         "complete_composite_inventory_accepted": (
             bool(complete_composite_report) and complete_composite_report["ok"]
         ),
@@ -720,6 +784,15 @@ def main() -> int:
             cached_ink_alignment == ink_alignment_good
             and cached_residual == complete_line_report
         ),
+        "shared_distance_transform_computed_once": (
+            shared_chord_source.distance_to_ink_computations == 1
+        ),
+        "content_addressed_svg_raster_cache": (
+            first_cache_stats.get("hit") is False
+            and second_cache_stats.get("hit") is True
+            and first_cache_stats.get("key") == second_cache_stats.get("key")
+            and svg_cache_pixels_equal
+        ),
         "adaptive_inspection_size": (
             adaptive_size == (2200, 1711)
             and 2.03 < adaptive_scale < 2.04
@@ -727,6 +800,11 @@ def main() -> int:
             and explicit_size == (2160, 1680)
             and explicit_scale == 2
             and explicit_mode == "explicit"
+        ),
+        "native_coordinate_grid_and_capped_sheet": (
+            grid_step == generated_grid_step == 50
+            and grid_image.size == (200, 160)
+            and preview_size == (1000, 778)
         ),
         "readable_default_style_reported": (
             reports["print-readability"]["render"]["render_style"]["solid_width"] >= 2.6

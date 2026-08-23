@@ -11,7 +11,8 @@ A Codex skill for rebuilding Korean math worksheets from photographed workbook p
 - Provenance checks that reject self-referential expected values
 - Stable ring-degree and midpoint-cut evidence for multigraphs
 - Source/redraw/overlay comparison reports with artifact hashes
-- Adaptive inspection sizing and shared comparison evidence for faster QA
+- Adaptive inspection sizing, crop-local native coordinate grids, and capped overview sheets
+- Segment-oriented faint-line validation, shared distance fields, and content-addressed SVG raster caching
 - PDF delivery gates and regression tests
 
 ## Privacy

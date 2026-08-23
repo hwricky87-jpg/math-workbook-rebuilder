@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,8 +54,53 @@ def trace_routing_report(manifest: dict[str, object] | None) -> dict[str, object
     }
 
 
-def rasterize_svg(path: Path, scale: float = 2.0) -> Image.Image:
+def _svg_raster_cache_key(path: Path, renderer: Path, scale: float) -> str:
+    """Key an SVG raster by every input that can change rendered pixels."""
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    digest.update(renderer.read_bytes())
+    lockfile = renderer.parent.parent / "package-lock.json"
+    if lockfile.is_file():
+        digest.update(lockfile.read_bytes())
+    digest.update(f"scale={scale:.8f}".encode("ascii"))
+    return digest.hexdigest()
+
+
+def rasterize_svg(
+    path: Path,
+    scale: float = 2.0,
+    cache_dir: Path | None = None,
+    use_cache: bool = True,
+    cache_stats: dict[str, object] | None = None,
+) -> Image.Image:
+    """Rasterize an SVG, reusing only a content-addressed verified cache entry."""
     renderer = Path(__file__).with_name("render_svg.mjs")
+    cache_key = _svg_raster_cache_key(path, renderer, scale)
+    if cache_stats is not None:
+        cache_stats.update({"enabled": use_cache, "hit": False, "key": cache_key})
+    if not use_cache:
+        with tempfile.TemporaryDirectory(prefix="geometry-render-") as directory:
+            output = Path(directory) / "render.png"
+            subprocess.run(
+                ["node", str(renderer), str(path), str(output), str(scale)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return Image.open(output).convert("RGB").copy()
+
+    cache_root = cache_dir or (Path(tempfile.gettempdir()) / "math-workbook-rebuilder-svg-cache")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cached_output = cache_root / f"{cache_key}.png"
+    if cached_output.is_file():
+        try:
+            image = Image.open(cached_output).convert("RGB").copy()
+            if cache_stats is not None:
+                cache_stats["hit"] = True
+            return image
+        except (OSError, ValueError):
+            cached_output.unlink(missing_ok=True)
+
     with tempfile.TemporaryDirectory(prefix="geometry-render-") as directory:
         output = Path(directory) / "render.png"
         subprocess.run(
@@ -62,7 +109,11 @@ def rasterize_svg(path: Path, scale: float = 2.0) -> Image.Image:
             capture_output=True,
             text=True,
         )
-        return Image.open(output).convert("RGB").copy()
+        image = Image.open(output).convert("RGB").copy()
+        temporary_cache = cache_root / f".{cache_key}-{os.getpid()}.tmp"
+        image.save(temporary_cache, format="PNG")
+        os.replace(temporary_cache, cached_output)
+        return image
 
 
 def fit_panel(image: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -105,9 +156,10 @@ class SourceEvidence:
 
     size: tuple[int, int]
     threshold: int
+    gray: np.ndarray
     mask: np.ndarray
-    mask_image: Image.Image
     _distance_to_ink: np.ndarray | None = field(default=None, repr=False)
+    _distance_to_ink_computations: int = field(default=0, repr=False)
     _stroke_width_px: float | None = field(default=None, repr=False)
 
     @classmethod
@@ -119,8 +171,8 @@ class SourceEvidence:
         return cls(
             size=source.size,
             threshold=threshold,
+            gray=source_array,
             mask=mask,
-            mask_image=Image.fromarray(mask.astype(np.uint8) * 255, mode="L"),
         )
 
     def distance_to_ink(self) -> np.ndarray:
@@ -128,7 +180,12 @@ class SourceEvidence:
             self._distance_to_ink = cv2.distanceTransform(
                 1 - self.mask.astype(np.uint8), cv2.DIST_L2, 5
             )
+            self._distance_to_ink_computations += 1
         return self._distance_to_ink
+
+    @property
+    def distance_to_ink_computations(self) -> int:
+        return self._distance_to_ink_computations
 
     def estimated_stroke_width(self) -> float:
         if self._stroke_width_px is None:
@@ -182,12 +239,11 @@ def ink_alignment(
     diagonal = math.hypot(*source.size)
     maximum_radius = max(2, int(round(diagonal * tolerance_ratio)))
     radii = sorted({max(1, maximum_radius // 3), max(1, (2 * maximum_radius) // 3), maximum_radius})
+    distance_to_source = prepared_source.distance_to_ink()
+    redraw_distances = distance_to_source[redraw_mask]
     coverage: dict[str, float] = {}
     for radius in radii:
-        filter_size = 2 * radius + 1
-        dilated = prepared_source.mask_image.filter(ImageFilter.MaxFilter(filter_size))
-        nearby_source = np.asarray(dilated, dtype=np.uint8) > 0
-        matched = int(np.logical_and(redraw_mask, nearby_source).sum())
+        matched = int((redraw_distances <= radius).sum())
         coverage[str(radius)] = matched / redraw_count if redraw_count else 0.0
 
     final_coverage = coverage[str(maximum_radius)]
@@ -219,6 +275,7 @@ def segment_source_support(
     radius_ratio: float = 0.004,
     minimum_support: float = 0.80,
     maximum_unsupported_gap_ratio: float = 0.18,
+    minimum_local_contrast: float = 6.0,
     source_evidence: SourceEvidence | None = None,
 ) -> dict[str, object]:
     """Check every declared solid segment against source ink at narrow tolerance.
@@ -267,47 +324,15 @@ def segment_source_support(
     stroke_radius = max(2, int(round(source_stroke_width * 2 + 1)))
     radius = min(nominal_radius, stroke_radius)
 
-    # A whole-page Otsu threshold can suppress a faint printed edge that is
-    # stable in its own crop. Add only segment-local native-pixel evidence,
-    # capped close to the global threshold, before computing the shared
-    # distance field. This is deterministic contrast assistance, not generated
-    # super-resolution: no coordinates or pixels are invented.
-    source_gray = np.asarray(
-        source.convert("L").filter(ImageFilter.MedianFilter(3)), dtype=np.uint8
-    )
-    support_mask = prepared_source.mask.copy()
+    # A whole-crop threshold can suppress a faint printed edge. Read each
+    # candidate through a narrow strip aligned to that segment, instead of
+    # thresholding its large axis-aligned bounding box and leaking those pixels
+    # into other segments. The center band must be darker than its own flanks,
+    # so flat shading or nearby unrelated ink cannot become a replacement edge.
+    source_gray = prepared_source.gray
+    distance_to_ink = prepared_source.distance_to_ink()
     local_thresholds: dict[str, int] = {}
-    local_margin = max(6, radius * 3)
-    for segment in manifest.get("segments", []):
-        if not isinstance(segment, dict) or segment.get("style", "solid") not in {
-            "solid", "emphasis"
-        }:
-            continue
-        start = points.get(segment.get("from"))
-        end = points.get(segment.get("to"))
-        if (
-            not isinstance(start, list) or len(start) != 2
-            or not isinstance(end, list) or len(end) != 2
-        ):
-            continue
-        x0 = max(0, int(math.floor(min(float(start[0]), float(end[0])))) - local_margin)
-        y0 = max(0, int(math.floor(min(float(start[1]), float(end[1])))) - local_margin)
-        x1 = min(source.width, int(math.ceil(max(float(start[0]), float(end[0])))) + local_margin + 1)
-        y1 = min(source.height, int(math.ceil(max(float(start[1]), float(end[1])))) + local_margin + 1)
-        patch = source_gray[y0:y1, x0:x1]
-        if patch.size == 0:
-            continue
-        local_otsu = _otsu_threshold(Image.fromarray(patch, mode="L"))
-        local_threshold = max(
-            prepared_source.threshold,
-            min(local_otsu, prepared_source.threshold + 12),
-        )
-        name = str(segment.get("name", f"{segment.get('from')}-{segment.get('to')}"))
-        local_thresholds[name] = local_threshold
-        support_mask[y0:y1, x0:x1] |= patch <= local_threshold
-    distance_to_ink = cv2.distanceTransform(
-        1 - support_mask.astype(np.uint8), cv2.DIST_L2, 5
-    )
+    oriented_strip_passes = 0
 
     records: list[dict[str, object]] = []
     for segment in manifest.get("segments", []):
@@ -330,13 +355,50 @@ def segment_source_support(
         x2, y2 = (float(end[0]), float(end[1]))
         length = math.hypot(x2 - x1, y2 - y1)
         sample_count = max(2, int(round(length)) + 1)
-        xs = np.clip(
-            np.rint(np.linspace(x1, x2, sample_count)).astype(int), 0, source.width - 1
+        sample_x = np.linspace(x1, x2, sample_count)
+        sample_y = np.linspace(y1, y2, sample_count)
+        xs = np.clip(np.rint(sample_x).astype(int), 0, source.width - 1)
+        ys = np.clip(np.rint(sample_y).astype(int), 0, source.height - 1)
+
+        normal_x = -(y2 - y1) / max(length, 1e-9)
+        normal_y = (x2 - x1) / max(length, 1e-9)
+        # Keep flank sampling local even when a large shaded region inflates the
+        # crop-wide stroke estimate. Otherwise the sampler can jump outside a
+        # flat fill and mistake the fill boundary for a line through its middle.
+        flank_width = max(
+            2,
+            min(radius * 2, int(round(source_stroke_width * 1.5))),
         )
-        ys = np.clip(
-            np.rint(np.linspace(y1, y2, sample_count)).astype(int), 0, source.height - 1
+        outer_radius = radius + flank_width
+        offsets = np.arange(-outer_radius, outer_radius + 1, dtype=float)
+        strip_x = np.clip(
+            np.rint(sample_x[:, None] + normal_x * offsets[None, :]).astype(int),
+            0,
+            source.width - 1,
         )
-        supported = distance_to_ink[ys, xs] <= radius
+        strip_y = np.clip(
+            np.rint(sample_y[:, None] + normal_y * offsets[None, :]).astype(int),
+            0,
+            source.height - 1,
+        )
+        strip = source_gray[strip_y, strip_x]
+        core = strip[:, np.abs(offsets) <= radius]
+        flanks = strip[:, np.abs(offsets) > radius]
+        center_dark = core.min(axis=1).astype(float)
+        flank_bright = np.percentile(flanks, 75, axis=1)
+        local_contrast = flank_bright - center_dark
+        local_otsu = _otsu_threshold(Image.fromarray(strip, mode="L"))
+        local_threshold = max(
+            prepared_source.threshold,
+            min(local_otsu, prepared_source.threshold + 12),
+        )
+        local_thresholds[name] = local_threshold
+        dark_support = np.logical_or(
+            distance_to_ink[ys, xs] <= radius,
+            center_dark <= local_threshold,
+        )
+        supported = np.logical_and(dark_support, local_contrast >= minimum_local_contrast)
+        oriented_strip_passes += 1
         support = float(supported.mean())
         longest_gap = 0
         current_gap = 0
@@ -344,9 +406,22 @@ def segment_source_support(
             current_gap = 0 if bool(value) else current_gap + 1
             longest_gap = max(longest_gap, current_gap)
         gap_ratio = longest_gap / max(1, sample_count - 1)
+        # Two endpoint/intersection samples may be ambiguous on very short
+        # printed edges. Express the same allowance in pixels so a 7 px edge is
+        # not held to an impossible fractional threshold, while long segments
+        # retain the configured ratio and coverage requirements.
+        endpoint_allowance_px = min(2, max(0, sample_count - 2))
+        effective_minimum_support = min(
+            minimum_support,
+            (sample_count - endpoint_allowance_px) / sample_count,
+        )
+        maximum_unsupported_gap_px = max(
+            endpoint_allowance_px,
+            int(math.ceil((sample_count - 1) * maximum_unsupported_gap_ratio)),
+        )
         record_ok = (
-            support >= minimum_support
-            and gap_ratio <= maximum_unsupported_gap_ratio
+            support >= effective_minimum_support
+            and longest_gap <= maximum_unsupported_gap_px
         )
         record = {
             "name": name,
@@ -355,8 +430,12 @@ def segment_source_support(
             "style": segment.get("style", "solid"),
             "length_px": length,
             "support": support,
+            "effective_minimum_support": effective_minimum_support,
+            "median_local_contrast": float(np.median(local_contrast)),
+            "minimum_local_contrast": minimum_local_contrast,
             "longest_unsupported_gap_px": longest_gap,
             "longest_unsupported_gap_ratio": gap_ratio,
+            "maximum_unsupported_gap_px": maximum_unsupported_gap_px,
             "ok": record_ok,
         }
         records.append(record)
@@ -370,10 +449,12 @@ def segment_source_support(
         "ok": not errors,
         "errors": errors,
         "applied": True,
-        "method": "per-solid-segment narrow source support",
+        "method": "per-solid-segment oriented-strip native source support",
         "source_threshold": prepared_source.threshold,
-        "threshold_method": "global Otsu plus segment-local native-pixel Otsu capped at global+12",
+        "threshold_method": "global Otsu plus segment-oriented native strip Otsu capped at global+12",
         "segment_local_thresholds": local_thresholds,
+        "oriented_strip_passes": oriented_strip_passes,
+        "axis_aligned_local_patch_passes": 0,
         "estimated_source_stroke_width_px": source_stroke_width,
         "radius_ratio": radius_ratio,
         "nominal_radius_px": nominal_radius,
@@ -381,6 +462,7 @@ def segment_source_support(
         "radius_px": radius,
         "minimum_support": minimum_support,
         "maximum_unsupported_gap_ratio": maximum_unsupported_gap_ratio,
+        "minimum_local_contrast": minimum_local_contrast,
         "segments": records,
     }
 
@@ -516,6 +598,7 @@ def residual_line_report(
 
 
 def main() -> int:
+    started = time.perf_counter()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("redraw", type=Path)
@@ -527,16 +610,36 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=420)
     parser.add_argument("--ink-tolerance", type=float, default=0.012)
     parser.add_argument("--min-redraw-ink-coverage", type=float, default=0.60)
+    parser.add_argument(
+        "--no-svg-cache",
+        action="store_true",
+        help="disable the content-addressed SVG raster cache for troubleshooting",
+    )
     args = parser.parse_args()
 
     source = Image.open(args.source).convert("RGB")
     if args.box:
         source = source.crop(tuple(args.box))
-    redraw = rasterize_svg(args.redraw) if args.redraw.suffix.lower() == ".svg" else Image.open(args.redraw).convert("RGB")
+    raster_cache: dict[str, object] = {
+        "enabled": False,
+        "hit": False,
+        "key": None,
+    }
+    redraw = (
+        rasterize_svg(
+            args.redraw,
+            use_cache=not args.no_svg_cache,
+            cache_stats=raster_cache,
+        )
+        if args.redraw.suffix.lower() == ".svg"
+        else Image.open(args.redraw).convert("RGB")
+    )
     manifest = json.loads(args.manifest.read_text(encoding="utf-8")) if args.manifest else None
+    inputs_ready = time.perf_counter()
     routing = trace_routing_report(manifest)
     prepared_source = SourceEvidence.prepare(source)
     prepared_redraw = RedrawEvidence.prepare(redraw, source.size)
+    evidence_ready = time.perf_counter()
     trace = trace_alignment(manifest) if manifest else None
     ink = ink_alignment(
         source,
@@ -559,6 +662,7 @@ def main() -> int:
         manifest,
         source_evidence=prepared_source,
     )
+    gates_ready = time.perf_counter()
     size = (args.width, args.height)
     source_panel, redraw_panel = fit_panel(source, size), fit_panel(redraw, size)
     overlay = Image.blend(source_panel, redraw_panel, 0.5)
@@ -622,6 +726,7 @@ def main() -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(args.out)
+    sheet_ready = time.perf_counter()
     result = {
         "ok": bool(
             routing.get("ok")
@@ -642,7 +747,20 @@ def main() -> int:
         "evidence_preparation": {
             "source_mask_passes": 1,
             "redraw_normalizations": 1,
+            "source_distance_to_ink_computations": prepared_source.distance_to_ink_computations,
+            "segment_axis_aligned_local_patch_passes": segment_support.get(
+                "axis_aligned_local_patch_passes", 0
+            ),
+            "segment_oriented_strip_passes": segment_support.get("oriented_strip_passes", 0),
             "estimated_source_stroke_width_px": prepared_source.estimated_stroke_width(),
+        },
+        "svg_raster_cache": raster_cache,
+        "timings_ms": {
+            "input_and_rasterization": round((inputs_ready - started) * 1000, 3),
+            "evidence_preparation": round((evidence_ready - inputs_ready) * 1000, 3),
+            "geometry_gates": round((gates_ready - evidence_ready) * 1000, 3),
+            "comparison_sheet": round((sheet_ready - gates_ready) * 1000, 3),
+            "total_before_report_write": round((sheet_ready - started) * 1000, 3),
         },
         "trace": trace,
         "trace_routing": routing,
