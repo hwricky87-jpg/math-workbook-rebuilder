@@ -6,10 +6,12 @@ A Codex skill for rebuilding Korean math worksheets from photographed workbook p
 
 - Exact worksheet transcription and handwriting-removal rules
 - SVG geometry reconstruction helpers
+- Print-readable SVG defaults with configurable stroke and label sizing
 - Quantitative landmark checks for traced diagrams
 - Provenance checks that reject self-referential expected values
 - Stable ring-degree and midpoint-cut evidence for multigraphs
 - Source/redraw/overlay comparison reports with artifact hashes
+- Adaptive inspection sizing and shared comparison evidence for faster QA
 - PDF delivery gates and regression tests
 
 ## Privacy

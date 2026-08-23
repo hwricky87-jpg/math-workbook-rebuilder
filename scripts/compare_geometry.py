@@ -9,6 +9,7 @@ import json
 import subprocess
 import tempfile
 import math
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -73,11 +74,72 @@ def _otsu_threshold(image: Image.Image) -> int:
     return best_threshold
 
 
+@dataclass
+class SourceEvidence:
+    """Source-derived masks shared by all comparison gates in one run."""
+
+    size: tuple[int, int]
+    threshold: int
+    mask: np.ndarray
+    mask_image: Image.Image
+    _distance_to_ink: np.ndarray | None = field(default=None, repr=False)
+    _stroke_width_px: float | None = field(default=None, repr=False)
+
+    @classmethod
+    def prepare(cls, source: Image.Image) -> "SourceEvidence":
+        source_gray = source.convert("L").filter(ImageFilter.MedianFilter(3))
+        threshold = _otsu_threshold(source_gray)
+        source_array = np.asarray(source_gray, dtype=np.uint8)
+        mask = source_array <= threshold
+        return cls(
+            size=source.size,
+            threshold=threshold,
+            mask=mask,
+            mask_image=Image.fromarray(mask.astype(np.uint8) * 255, mode="L"),
+        )
+
+    def distance_to_ink(self) -> np.ndarray:
+        if self._distance_to_ink is None:
+            self._distance_to_ink = cv2.distanceTransform(
+                1 - self.mask.astype(np.uint8), cv2.DIST_L2, 5
+            )
+        return self._distance_to_ink
+
+    def estimated_stroke_width(self) -> float:
+        if self._stroke_width_px is None:
+            inside_distance = cv2.distanceTransform(
+                self.mask.astype(np.uint8), cv2.DIST_L2, 5
+            )
+            positive = inside_distance[self.mask]
+            estimate = float(2 * np.median(positive)) if positive.size else 1.0
+            self._stroke_width_px = max(1.0, estimate)
+        return self._stroke_width_px
+
+
+@dataclass(frozen=True)
+class RedrawEvidence:
+    """A redraw normalized once to the source pixel frame."""
+
+    source_size: tuple[int, int]
+    mask: np.ndarray
+    threshold: int = 225
+
+    @classmethod
+    def prepare(cls, redraw: Image.Image, source_size: tuple[int, int]) -> "RedrawEvidence":
+        normalized = redraw.convert("L").resize(source_size, Image.Resampling.LANCZOS)
+        return cls(
+            source_size=source_size,
+            mask=np.asarray(normalized, dtype=np.uint8) <= 225,
+        )
+
+
 def ink_alignment(
     source: Image.Image,
     redraw: Image.Image,
     tolerance_ratio: float = 0.012,
     minimum_coverage: float = 0.60,
+    source_evidence: SourceEvidence | None = None,
+    redraw_evidence: RedrawEvidence | None = None,
 ) -> dict[str, object]:
     """Measure how much redraw ink lies near independently observed source ink.
 
@@ -85,15 +147,11 @@ def ink_alignment(
     one-way precision measure: source labels and page noise may be absent from a
     clean redraw, but invented or displaced redraw strokes are penalized.
     """
-    source_gray = source.convert("L").filter(ImageFilter.MedianFilter(3))
-    threshold = _otsu_threshold(source_gray)
-    source_array = np.asarray(source_gray, dtype=np.uint8)
-    source_mask_array = source_array <= threshold
-    source_mask = Image.fromarray((source_mask_array.astype(np.uint8) * 255), mode="L")
-
-    normalized_redraw = redraw.convert("L").resize(source.size, Image.Resampling.LANCZOS)
-    redraw_array = np.asarray(normalized_redraw, dtype=np.uint8)
-    redraw_mask = redraw_array <= 225
+    prepared_source = source_evidence or SourceEvidence.prepare(source)
+    prepared_redraw = redraw_evidence or RedrawEvidence.prepare(redraw, source.size)
+    if prepared_source.size != source.size or prepared_redraw.source_size != source.size:
+        raise ValueError("comparison evidence does not match the source size")
+    redraw_mask = prepared_redraw.mask
     redraw_count = int(redraw_mask.sum())
 
     diagonal = math.hypot(*source.size)
@@ -102,7 +160,7 @@ def ink_alignment(
     coverage: dict[str, float] = {}
     for radius in radii:
         filter_size = 2 * radius + 1
-        dilated = source_mask.filter(ImageFilter.MaxFilter(filter_size))
+        dilated = prepared_source.mask_image.filter(ImageFilter.MaxFilter(filter_size))
         nearby_source = np.asarray(dilated, dtype=np.uint8) > 0
         matched = int(np.logical_and(redraw_mask, nearby_source).sum())
         coverage[str(radius)] = matched / redraw_count if redraw_count else 0.0
@@ -120,8 +178,8 @@ def ink_alignment(
         "ok": not errors,
         "errors": errors,
         "method": "one-way redraw-to-source ink proximity",
-        "source_threshold": threshold,
-        "redraw_threshold": 225,
+        "source_threshold": prepared_source.threshold,
+        "redraw_threshold": prepared_redraw.threshold,
         "tolerance_ratio": tolerance_ratio,
         "maximum_radius_px": maximum_radius,
         "minimum_coverage": minimum_coverage,
@@ -136,6 +194,7 @@ def segment_source_support(
     radius_ratio: float = 0.004,
     minimum_support: float = 0.80,
     maximum_unsupported_gap_ratio: float = 0.18,
+    source_evidence: SourceEvidence | None = None,
 ) -> dict[str, object]:
     """Check every declared solid segment against source ink at narrow tolerance.
 
@@ -174,13 +233,15 @@ def segment_source_support(
             "segments": [],
         }
 
-    source_gray = source.convert("L").filter(ImageFilter.MedianFilter(3))
-    threshold = _otsu_threshold(source_gray)
-    source_array = np.asarray(source_gray, dtype=np.uint8)
-    source_mask = (source_array <= threshold).astype(np.uint8)
-    distance_to_ink = cv2.distanceTransform(1 - source_mask, cv2.DIST_L2, 5)
+    prepared_source = source_evidence or SourceEvidence.prepare(source)
+    if prepared_source.size != source.size:
+        raise ValueError("source evidence does not match the source size")
+    distance_to_ink = prepared_source.distance_to_ink()
     diagonal = math.hypot(*source.size)
-    radius = max(2, int(round(diagonal * radius_ratio)))
+    nominal_radius = max(2, int(round(diagonal * radius_ratio)))
+    source_stroke_width = prepared_source.estimated_stroke_width()
+    stroke_radius = max(2, int(round(source_stroke_width * 2 + 1)))
+    radius = min(nominal_radius, stroke_radius)
 
     records: list[dict[str, object]] = []
     for segment in manifest.get("segments", []):
@@ -244,8 +305,11 @@ def segment_source_support(
         "errors": errors,
         "applied": True,
         "method": "per-solid-segment narrow source support",
-        "source_threshold": threshold,
+        "source_threshold": prepared_source.threshold,
+        "estimated_source_stroke_width_px": source_stroke_width,
         "radius_ratio": radius_ratio,
+        "nominal_radius_px": nominal_radius,
+        "stroke_limited_radius_px": stroke_radius,
         "radius_px": radius,
         "minimum_support": minimum_support,
         "maximum_unsupported_gap_ratio": maximum_unsupported_gap_ratio,
@@ -259,6 +323,8 @@ def residual_line_report(
     manifest: dict[str, object] | None = None,
     tolerance_ratio: float = 0.012,
     minimum_line_ratio: float = 0.085,
+    source_evidence: SourceEvidence | None = None,
+    redraw_evidence: RedrawEvidence | None = None,
 ) -> dict[str, object]:
     """Detect long straight source strokes left unexplained by the redraw.
 
@@ -267,11 +333,12 @@ def residual_line_report(
     direction complements ``ink_alignment`` and catches omitted geometry
     without requiring the missing segment to have been named first.
     """
-    source_gray = source.convert("L").filter(ImageFilter.MedianFilter(3))
-    threshold = _otsu_threshold(source_gray)
-    source_mask = np.asarray(source_gray, dtype=np.uint8) <= threshold
-    normalized_redraw = redraw.convert("L").resize(source.size, Image.Resampling.LANCZOS)
-    redraw_mask = np.asarray(normalized_redraw, dtype=np.uint8) <= 225
+    prepared_source = source_evidence or SourceEvidence.prepare(source)
+    prepared_redraw = redraw_evidence or RedrawEvidence.prepare(redraw, source.size)
+    if prepared_source.size != source.size or prepared_redraw.source_size != source.size:
+        raise ValueError("comparison evidence does not match the source size")
+    source_mask = prepared_source.mask
+    redraw_mask = prepared_redraw.mask
 
     diagonal = math.hypot(*source.size)
     tolerance_radius = max(2, int(round(diagonal * tolerance_ratio)))
@@ -368,8 +435,8 @@ def residual_line_report(
         "errors": errors,
         "method": "reverse source-to-redraw long-line residual census",
         "scope": scope,
-        "source_threshold": threshold,
-        "redraw_threshold": 225,
+        "source_threshold": prepared_source.threshold,
+        "redraw_threshold": prepared_redraw.threshold,
         "tolerance_ratio": tolerance_ratio,
         "tolerance_radius_px": tolerance_radius,
         "minimum_line_ratio": minimum_line_ratio,
@@ -399,20 +466,30 @@ def main() -> int:
         source = source.crop(tuple(args.box))
     redraw = rasterize_svg(args.redraw) if args.redraw.suffix.lower() == ".svg" else Image.open(args.redraw).convert("RGB")
     manifest = json.loads(args.manifest.read_text(encoding="utf-8")) if args.manifest else None
+    prepared_source = SourceEvidence.prepare(source)
+    prepared_redraw = RedrawEvidence.prepare(redraw, source.size)
     trace = trace_alignment(manifest) if manifest else None
     ink = ink_alignment(
         source,
         redraw,
         tolerance_ratio=args.ink_tolerance,
         minimum_coverage=args.min_redraw_ink_coverage,
+        source_evidence=prepared_source,
+        redraw_evidence=prepared_redraw,
     )
     residual = residual_line_report(
         source,
         redraw,
         manifest=manifest,
         tolerance_ratio=args.ink_tolerance,
+        source_evidence=prepared_source,
+        redraw_evidence=prepared_redraw,
     )
-    segment_support = segment_source_support(source, manifest)
+    segment_support = segment_source_support(
+        source,
+        manifest,
+        source_evidence=prepared_source,
+    )
     size = (args.width, args.height)
     source_panel, redraw_panel = fit_panel(source, size), fit_panel(redraw, size)
     overlay = Image.blend(source_panel, redraw_panel, 0.5)
@@ -484,6 +561,11 @@ def main() -> int:
         "source_size": list(source.size),
         "redraw_size": list(redraw.size),
         "panel_size": list(size),
+        "evidence_preparation": {
+            "source_mask_passes": 1,
+            "redraw_normalizations": 1,
+            "estimated_source_stroke_width_px": prepared_source.estimated_stroke_width(),
+        },
         "trace": trace,
         "ink_alignment": ink,
         "source_residual": residual,

@@ -14,7 +14,7 @@ from typing import Any
 
 from PIL import Image
 
-from geometry_svg import _resolved_face, _resolve_point, net_report
+from geometry_svg import _resolve_render_style, _resolved_face, _resolve_point, net_report
 from imgprobe import stability_report
 
 
@@ -737,6 +737,11 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     canvas = manifest.get("canvas", {})
     if float(canvas.get("width", 0)) <= 0 or float(canvas.get("height", 0)) <= 0:
         errors.append("canvas width and height must be positive")
+    try:
+        render_style = _resolve_render_style(manifest)
+    except (TypeError, ValueError) as exc:
+        render_style = None
+        errors.append(f"invalid render_style: {exc}")
 
     explicit_points = {
         name: _resolve_point(value, {}) for name, value in manifest.get("points", {}).items()
@@ -846,6 +851,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
+        "render_style": render_style,
         "net": net,
         "graph": graph,
         "trace": trace,

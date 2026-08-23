@@ -18,42 +18,113 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-STYLE = """
-.solid{fill:none;stroke:#28334a;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
-.dashed{fill:none;stroke:#28334a;stroke-width:1.7;stroke-dasharray:7 5;stroke-linejoin:round;stroke-linecap:round}
-.guide{fill:none;stroke:#687386;stroke-width:1.35;stroke-dasharray:3 4;stroke-linejoin:round;stroke-linecap:round}
-.emphasis{fill:none;stroke:#28334a;stroke-width:3.2;stroke-linejoin:round;stroke-linecap:round}
-.face-top{fill:#f4f5f8;stroke:none}.face-side{fill:#dce1e8;stroke:none}.face-dark{fill:#c8cfd9;stroke:none}
-.label{font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-size:15px;fill:#202a3d}
-.measure{font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-size:14px;font-weight:600;fill:#202a3d}
-.point{fill:#28334a;stroke:none}
+DEFAULT_RENDER_STYLE = {
+    "solid_width": 2.6,
+    "dashed_width": 2.3,
+    "guide_width": 1.6,
+    "emphasis_width": 3.4,
+    "label_size": 18.0,
+    "measure_size": 16.0,
+    "label_weight": 700.0,
+    "measure_weight": 600.0,
+    "label_outline": 0.65,
+    "measure_outline": 0.45,
+    "label_halo": 2.4,
+    "measure_halo": 2.0,
+}
+
+STYLE_LIMITS = {
+    "solid_width": (0.75, 6.0),
+    "dashed_width": (0.75, 6.0),
+    "guide_width": (0.5, 4.0),
+    "emphasis_width": (1.0, 8.0),
+    "label_size": (9.0, 36.0),
+    "measure_size": (9.0, 36.0),
+    "label_weight": (400.0, 800.0),
+    "measure_weight": (400.0, 800.0),
+    "label_outline": (0.0, 2.0),
+    "measure_outline": (0.0, 2.0),
+    "label_halo": (0.0, 6.0),
+    "measure_halo": (0.0, 6.0),
+}
+
+FONT_FAMILY_CSS = "'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif"
+FONT_FAMILY_ATTR = "Noto Sans KR, Malgun Gothic, Apple SD Gothic Neo, Arial, sans-serif"
+
+
+def _resolve_render_style(manifest: dict[str, Any]) -> dict[str, float]:
+    requested = manifest.get("render_style", {})
+    if not isinstance(requested, dict):
+        raise TypeError("render_style must be an object")
+    unknown = sorted(set(requested) - set(DEFAULT_RENDER_STYLE))
+    if unknown:
+        raise ValueError(f"unknown render_style keys: {', '.join(unknown)}")
+    resolved = dict(DEFAULT_RENDER_STYLE)
+    for key, value in requested.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"render_style.{key} must be numeric")
+        number = float(value)
+        low, high = STYLE_LIMITS[key]
+        if not low <= number <= high:
+            raise ValueError(f"render_style.{key} must be between {low:g} and {high:g}")
+        resolved[key] = number
+    return resolved
+
+
+def _style_maps(profile: dict[str, float]) -> tuple[str, dict[str, str], dict[str, str]]:
+    solid_width = _num(profile["solid_width"])
+    dashed_width = _num(profile["dashed_width"])
+    guide_width = _num(profile["guide_width"])
+    emphasis_width = _num(profile["emphasis_width"])
+    label_size = _num(profile["label_size"])
+    measure_size = _num(profile["measure_size"])
+    label_weight = _num(profile["label_weight"])
+    measure_weight = _num(profile["measure_weight"])
+    label_outline = _num(profile["label_outline"])
+    measure_outline = _num(profile["measure_outline"])
+    label_halo = _num(profile["label_halo"])
+    measure_halo = _num(profile["measure_halo"])
+    style = f"""
+.solid{{fill:none;stroke:#28334a;stroke-width:{solid_width};stroke-linejoin:round;stroke-linecap:round}}
+.dashed{{fill:none;stroke:#28334a;stroke-width:{dashed_width};stroke-dasharray:8 5.5;stroke-linejoin:round;stroke-linecap:round}}
+.guide{{fill:none;stroke:#687386;stroke-width:{guide_width};stroke-dasharray:3.5 4.5;stroke-linejoin:round;stroke-linecap:round}}
+.emphasis{{fill:none;stroke:#28334a;stroke-width:{emphasis_width};stroke-linejoin:round;stroke-linecap:round}}
+.face-top{{fill:#f4f5f8;stroke:none}}.face-side{{fill:#dce1e8;stroke:none}}.face-dark{{fill:#c8cfd9;stroke:none}}
+.label-halo{{font-family:{FONT_FAMILY_CSS};font-size:{label_size}px;font-weight:{label_weight};fill:#fff;stroke:#fff;stroke-width:{label_halo}px;stroke-linejoin:round}}
+.measure-halo{{font-family:{FONT_FAMILY_CSS};font-size:{measure_size}px;font-weight:{measure_weight};fill:#fff;stroke:#fff;stroke-width:{measure_halo}px;stroke-linejoin:round}}
+.label{{font-family:{FONT_FAMILY_CSS};font-size:{label_size}px;font-weight:{label_weight};fill:#202a3d;paint-order:stroke fill;stroke:#202a3d;stroke-width:{label_outline}px;stroke-linejoin:round}}
+.measure{{font-family:{FONT_FAMILY_CSS};font-size:{measure_size}px;font-weight:{measure_weight};fill:#202a3d;paint-order:stroke fill;stroke:#202a3d;stroke-width:{measure_outline}px;stroke-linejoin:round}}
+.point{{fill:#28334a;stroke:none}}
 """
-
-INLINE_STYLE = {
-    "solid": "fill:none;stroke:#28334a;stroke-width:2;stroke-linejoin:round;stroke-linecap:round",
-    "dashed": "fill:none;stroke:#28334a;stroke-width:1.7;stroke-dasharray:7 5;stroke-linejoin:round;stroke-linecap:round",
-    "guide": "fill:none;stroke:#687386;stroke-width:1.35;stroke-dasharray:3 4;stroke-linejoin:round;stroke-linecap:round",
-    "emphasis": "fill:none;stroke:#28334a;stroke-width:3.2;stroke-linejoin:round;stroke-linecap:round",
-    "face-top": "fill:#f4f5f8;stroke:none",
-    "face-side": "fill:#dce1e8;stroke:none",
-    "face-dark": "fill:#c8cfd9;stroke:none",
-    "label": "font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-size:15px;fill:#202a3d",
-    "measure": "font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-size:14px;font-weight:600;fill:#202a3d",
-    "point": "fill:#28334a;stroke:none",
-}
-
-PRESENTATION = {
-    "solid": 'fill="none" stroke="#28334a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"',
-    "dashed": 'fill="none" stroke="#28334a" stroke-width="1.7" stroke-dasharray="7 5" stroke-linejoin="round" stroke-linecap="round"',
-    "guide": 'fill="none" stroke="#687386" stroke-width="1.35" stroke-dasharray="3 4" stroke-linejoin="round" stroke-linecap="round"',
-    "emphasis": 'fill="none" stroke="#28334a" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"',
-    "face-top": 'fill="#f4f5f8" stroke="none"',
-    "face-side": 'fill="#dce1e8" stroke="none"',
-    "face-dark": 'fill="#c8cfd9" stroke="none"',
-    "label": 'fill="#202a3d" font-family="Malgun Gothic, Apple SD Gothic Neo, sans-serif" font-size="15"',
-    "measure": 'fill="#202a3d" font-family="Malgun Gothic, Apple SD Gothic Neo, sans-serif" font-size="14" font-weight="600"',
-    "point": 'fill="#28334a" stroke="none"',
-}
+    inline = {
+        "solid": f"fill:none;stroke:#28334a;stroke-width:{solid_width};stroke-linejoin:round;stroke-linecap:round",
+        "dashed": f"fill:none;stroke:#28334a;stroke-width:{dashed_width};stroke-dasharray:8 5.5;stroke-linejoin:round;stroke-linecap:round",
+        "guide": f"fill:none;stroke:#687386;stroke-width:{guide_width};stroke-dasharray:3.5 4.5;stroke-linejoin:round;stroke-linecap:round",
+        "emphasis": f"fill:none;stroke:#28334a;stroke-width:{emphasis_width};stroke-linejoin:round;stroke-linecap:round",
+        "face-top": "fill:#f4f5f8;stroke:none",
+        "face-side": "fill:#dce1e8;stroke:none",
+        "face-dark": "fill:#c8cfd9;stroke:none",
+        "label-halo": f"font-family:{FONT_FAMILY_CSS};font-size:{label_size}px;font-weight:{label_weight};fill:#fff;stroke:#fff;stroke-width:{label_halo}px;stroke-linejoin:round",
+        "measure-halo": f"font-family:{FONT_FAMILY_CSS};font-size:{measure_size}px;font-weight:{measure_weight};fill:#fff;stroke:#fff;stroke-width:{measure_halo}px;stroke-linejoin:round",
+        "label": f"font-family:{FONT_FAMILY_CSS};font-size:{label_size}px;font-weight:{label_weight};fill:#202a3d;paint-order:stroke fill;stroke:#202a3d;stroke-width:{label_outline}px;stroke-linejoin:round",
+        "measure": f"font-family:{FONT_FAMILY_CSS};font-size:{measure_size}px;font-weight:{measure_weight};fill:#202a3d;paint-order:stroke fill;stroke:#202a3d;stroke-width:{measure_outline}px;stroke-linejoin:round",
+        "point": "fill:#28334a;stroke:none",
+    }
+    presentation = {
+        "solid": f'fill="none" stroke="#28334a" stroke-width="{solid_width}" stroke-linejoin="round" stroke-linecap="round"',
+        "dashed": f'fill="none" stroke="#28334a" stroke-width="{dashed_width}" stroke-dasharray="8 5.5" stroke-linejoin="round" stroke-linecap="round"',
+        "guide": f'fill="none" stroke="#687386" stroke-width="{guide_width}" stroke-dasharray="3.5 4.5" stroke-linejoin="round" stroke-linecap="round"',
+        "emphasis": f'fill="none" stroke="#28334a" stroke-width="{emphasis_width}" stroke-linejoin="round" stroke-linecap="round"',
+        "face-top": 'fill="#f4f5f8" stroke="none"',
+        "face-side": 'fill="#dce1e8" stroke="none"',
+        "face-dark": 'fill="#c8cfd9" stroke="none"',
+        "label-halo": f'fill="#fff" stroke="#fff" stroke-width="{label_halo}" stroke-linejoin="round" font-family="{FONT_FAMILY_ATTR}" font-size="{label_size}" font-weight="{label_weight}"',
+        "measure-halo": f'fill="#fff" stroke="#fff" stroke-width="{measure_halo}" stroke-linejoin="round" font-family="{FONT_FAMILY_ATTR}" font-size="{measure_size}" font-weight="{measure_weight}"',
+        "label": f'fill="#202a3d" stroke="#202a3d" stroke-width="{label_outline}" paint-order="stroke fill" stroke-linejoin="round" font-family="{FONT_FAMILY_ATTR}" font-size="{label_size}" font-weight="{label_weight}"',
+        "measure": f'fill="#202a3d" stroke="#202a3d" stroke-width="{measure_outline}" paint-order="stroke fill" stroke-linejoin="round" font-family="{FONT_FAMILY_ATTR}" font-size="{measure_size}" font-weight="{measure_weight}"',
+        "point": 'fill="#28334a" stroke="none"',
+    }
+    return style, inline, presentation
 
 Point = tuple[float, float]
 
@@ -150,16 +221,19 @@ def net_report(faces: list[list[Point]], tolerance: float = 0.25) -> dict[str, A
 
 
 class SVGDocument:
-    def __init__(self, width: float, height: float, view_box: list[float] | None = None):
+    def __init__(self, width: float, height: float, view_box: list[float] | None = None,
+                 render_style: dict[str, float] | None = None):
         self.width = width
         self.height = height
         self.view_box = view_box or [0.0, 0.0, width, height]
         self.items: list[str] = []
+        self.render_style = render_style or dict(DEFAULT_RENDER_STYLE)
+        self.style, self.inline_style, self.presentation = _style_maps(self.render_style)
 
     def polygon(self, points: list[Point], css_class: str = "solid", fill: str | None = None,
                 stroke: bool = True) -> None:
-        style = INLINE_STYLE.get(css_class, INLINE_STYLE["solid"])
-        presentation = PRESENTATION.get(css_class, PRESENTATION["solid"])
+        style = self.inline_style.get(css_class, self.inline_style["solid"])
+        presentation = self.presentation.get(css_class, self.presentation["solid"])
         if fill is not None:
             style += f";fill:{html.escape(fill)}"
             presentation = re.sub(r'fill="[^"]*"', f'fill="{html.escape(fill)}"', presentation)
@@ -173,8 +247,8 @@ class SVGDocument:
 
     def line(self, a: Point, b: Point, css_class: str = "solid", name: str | None = None) -> None:
         name_attr = f' data-name="{html.escape(name)}"' if name else ""
-        style = INLINE_STYLE.get(css_class, INLINE_STYLE["solid"])
-        presentation = PRESENTATION.get(css_class, PRESENTATION["solid"])
+        style = self.inline_style.get(css_class, self.inline_style["solid"])
+        presentation = self.presentation.get(css_class, self.presentation["solid"])
         self.items.append(
             f'<line class="{html.escape(css_class)}" x1="{_num(a[0])}" y1="{_num(a[1])}" '
             f'x2="{_num(b[0])}" y2="{_num(b[1])}" {presentation} style="{style}"{name_attr}/>'
@@ -199,8 +273,8 @@ class SVGDocument:
                     f" {_num(p2[0])} {_num(p2[1])}"
                 )
         name_attr = f' data-name="{html.escape(name)}"' if name else ""
-        style = INLINE_STYLE.get(css_class, INLINE_STYLE["solid"])
-        presentation = PRESENTATION.get(css_class, PRESENTATION["solid"])
+        style = self.inline_style.get(css_class, self.inline_style["solid"])
+        presentation = self.presentation.get(css_class, self.presentation["solid"])
         self.items.append(
             f'<path class="{html.escape(css_class)}" d="{d}" {presentation} style="{style}"{name_attr}/>'
         )
@@ -208,18 +282,27 @@ class SVGDocument:
     def text(self, point: Point, content: str, css_class: str = "label", anchor: str = "middle",
              name: str | None = None) -> None:
         name_attr = f' data-name="{html.escape(name)}"' if name else ""
-        style = INLINE_STYLE.get(css_class, INLINE_STYLE["label"])
-        presentation = PRESENTATION.get(css_class, PRESENTATION["label"])
+        style = self.inline_style.get(css_class, self.inline_style["label"])
+        presentation = self.presentation.get(css_class, self.presentation["label"])
+        escaped_content = html.escape(str(content))
+        if css_class in {"label", "measure"} and self.render_style[f"{css_class}_halo"] > 0:
+            halo_class = f"{css_class}-halo"
+            self.items.append(
+                f'<text class="{halo_class}" x="{_num(point[0])}" y="{_num(point[1])}" '
+                f'text-anchor="{html.escape(anchor)}" {self.presentation[halo_class]} '
+                f'style="{self.inline_style[halo_class]}" aria-hidden="true">'
+                f'{escaped_content}</text>'
+            )
         self.items.append(
             f'<text class="{html.escape(css_class)}" x="{_num(point[0])}" y="{_num(point[1])}" '
             f'text-anchor="{html.escape(anchor)}" {presentation} style="{style}"{name_attr}>'
-            f'{html.escape(str(content))}</text>'
+            f'{escaped_content}</text>'
         )
 
     def dot(self, point: Point, radius: float = 2.7) -> None:
         self.items.append(
             f'<circle class="point" cx="{_num(point[0])}" cy="{_num(point[1])}" r="{_num(radius)}" '
-            f'{PRESENTATION["point"]} style="{INLINE_STYLE["point"]}"/>'
+            f'{self.presentation["point"]} style="{self.inline_style["point"]}"/>'
         )
 
     def serialize(self) -> str:
@@ -227,7 +310,7 @@ class SVGDocument:
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{_num(self.width)}" height="{_num(self.height)}" '
             f'viewBox="{_num(x)} {_num(y)} {_num(w)} {_num(h)}">'
-            f'<style>{STYLE}</style>{"".join(self.items)}</svg>\n'
+            f'<style>{self.style}</style>{"".join(self.items)}</svg>\n'
         )
 
 
@@ -296,11 +379,15 @@ def render_manifest(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     width = float(canvas.get("width", 320))
     height = float(canvas.get("height", 240))
     view_box = [float(v) for v in canvas.get("viewBox", [0, 0, width, height])]
-    doc = SVGDocument(width, height, view_box)
+    render_style = _resolve_render_style(manifest)
+    doc = SVGDocument(width, height, view_box, render_style)
     points: dict[str, Point] = {
         name: _resolve_point(value, {}) for name, value in manifest.get("points", {}).items()
     }
-    report: dict[str, Any] = {"type": manifest.get("type", "trace")}
+    report: dict[str, Any] = {
+        "type": manifest.get("type", "trace"),
+        "render_style": render_style,
+    }
 
     if manifest.get("type") == "prism":
         generated = _prism(doc, manifest["prism"])

@@ -15,9 +15,16 @@ import pymupdf
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from compare_geometry import ink_alignment, residual_line_report, segment_source_support
+from compare_geometry import (
+    RedrawEvidence,
+    SourceEvidence,
+    ink_alignment,
+    residual_line_report,
+    segment_source_support,
+)
 from geometry_svg import polygon_on_edge, render_manifest
 from imgprobe import cut_crossings, ring_strands, stability_report
+from preprocess_geometry import inspection_size
 from validate_delivery import validate_delivery_manifest
 from validate_geometry import (
     graph_structure,
@@ -61,6 +68,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
 
     prism = {
@@ -196,6 +204,28 @@ def main() -> int:
         },
     }
 
+    readability = {
+        "type": "trace",
+        "source": {"fixture": "synthetic-print-readability"},
+        "semantic_check": "A labeled segment remains legible after the standard 2x raster render.",
+        "canvas": {"width": 240, "height": 120},
+        "points": {"L": [30, 85], "R": [210, 85]},
+        "segments": [
+            {"name": "readable-line", "from": "L", "to": "R", "style": "solid"}
+        ],
+        "labels": [
+            {"text": "A", "at": [60, 42]},
+            {"text": "ㄱ", "at": [180, 42]},
+        ],
+        "trace_evidence": {
+            "method": "synthetic pixel-landmark trace",
+            "inspection_artifact": "synthetic-readability-inspection.png",
+            "source_size": [240, 120],
+            "max_normalized_error": 0.015,
+            "points": {"L": [30, 85], "R": [210, 85]},
+        },
+    }
+
     reports = {}
     rendered = []
     for name, manifest in (
@@ -203,6 +233,7 @@ def main() -> int:
         ("hexagonal-net", net),
         ("asymmetric-trace", trace),
         ("measured-multigraph", graph),
+        ("print-readability", readability),
     ):
         _, svg_path, report = save_case(args.out, name, manifest)
         reports[name] = report
@@ -377,6 +408,55 @@ def main() -> int:
     ]
     segment_support_good = segment_source_support(chord_source, chord_manifest)
     segment_support_bad = segment_source_support(chord_source, chord_manifest_wrong)
+    stroke_limited_support = segment_source_support(
+        chord_source,
+        chord_manifest,
+        radius_ratio=0.04,
+    )
+
+    prepared_source = SourceEvidence.prepare(ink_source)
+    prepared_redraw = RedrawEvidence.prepare(ink_redraw_good, ink_source.size)
+    cached_ink_alignment = ink_alignment(
+        ink_source,
+        ink_redraw_good,
+        minimum_coverage=0.90,
+        source_evidence=prepared_source,
+        redraw_evidence=prepared_redraw,
+    )
+    cached_residual = residual_line_report(
+        omission_source,
+        omission_redraw_complete,
+        source_evidence=SourceEvidence.prepare(omission_source),
+        redraw_evidence=RedrawEvidence.prepare(omission_redraw_complete, omission_source.size),
+    )
+
+    readability_image = dict(rendered)["print-readability"]
+    readability_array = np.asarray(readability_image.convert("L"), dtype=np.uint8)
+    line_column = readability_array[150:190, 240]
+    dark_positions = np.flatnonzero(line_column < 190)
+    readable_line_thickness = 0
+    if dark_positions.size:
+        runs = np.split(dark_positions, np.where(np.diff(dark_positions) > 1)[0] + 1)
+        readable_line_thickness = max(len(run) for run in runs)
+    latin_label_ink = int((readability_array[35:100, 75:165] < 190).sum())
+    hangul_label_ink = int((readability_array[35:100, 315:405] < 190).sum())
+    adaptive_size, adaptive_scale, adaptive_mode = inspection_size(1080, 840)
+    explicit_size, explicit_scale, explicit_mode = inspection_size(
+        1080, 840, explicit_scale=2
+    )
+
+    invalid_style_manifest = json.loads(json.dumps(readability))
+    invalid_style_manifest["render_style"] = {"solid_width": 0.2}
+    invalid_style_report = validate_manifest(invalid_style_manifest)
+    invalid_style_rejected = False
+    try:
+        render_manifest(invalid_style_manifest)
+    except ValueError:
+        invalid_style_rejected = True
+    invalid_style_rejected = invalid_style_rejected and (
+        not invalid_style_report["ok"]
+        and any("invalid render_style" in error for error in invalid_style_report["errors"])
+    )
 
     graph_source_path = args.out / "graph-probe-source.png"
     graph_inspection_path = args.out / "graph-probe-inspection.png"
@@ -530,6 +610,7 @@ def main() -> int:
             omission_one_way["ok"] and not omitted_line_report["ok"]
         ),
         "unsupported_chord_rejected": not segment_support_bad["ok"],
+        "invalid_render_style_rejected": invalid_style_rejected,
         "missing_independent_trace_observation_rejected": (
             "trace observation artifact does not exist"
             in trace_without_observation_report["errors"]
@@ -549,6 +630,31 @@ def main() -> int:
         "aligned_redraw_ink_accepted": ink_alignment_good["ok"],
         "complete_source_line_census_accepted": complete_line_report["ok"],
         "per_segment_source_support_accepted": segment_support_good["ok"],
+        "stroke_width_limited_segment_tolerance": (
+            stroke_limited_support["radius_px"]
+            < stroke_limited_support["nominal_radius_px"]
+        ),
+        "shared_comparison_evidence_preserves_results": (
+            cached_ink_alignment == ink_alignment_good
+            and cached_residual == complete_line_report
+        ),
+        "adaptive_inspection_size": (
+            adaptive_size == (2200, 1711)
+            and 2.03 < adaptive_scale < 2.04
+            and adaptive_mode == "adaptive-max-long-edge"
+            and explicit_size == (2160, 1680)
+            and explicit_scale == 2
+            and explicit_mode == "explicit"
+        ),
+        "readable_default_style_reported": (
+            reports["print-readability"]["render"]["render_style"]["solid_width"] >= 2.6
+            and reports["print-readability"]["render"]["render_style"]["dashed_width"] >= 2.3
+            and reports["print-readability"]["render"]["render_style"]["label_size"] >= 18
+            and reports["print-readability"]["render"]["render_style"]["label_weight"] >= 700
+        ),
+        "readable_raster_line_weight": readable_line_thickness >= 4,
+        "latin_label_raster_visible": latin_label_ink >= 40,
+        "hangul_label_raster_visible": hangul_label_ink >= 25,
     }
 
     all_ok = (
