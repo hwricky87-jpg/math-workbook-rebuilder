@@ -38,6 +38,8 @@ output/                 사용자용 PDF
   "trace_evidence": {
     "method": "manual pixel landmark trace",
     "inspection_artifact": "work/inspection/p03/inspection-sheet.png",
+    "observation_artifact": "work/inspection/p03/source-observation.json",
+    "observation_sha256": "...",
     "source_size": [2400, 1800],
     "max_normalized_error": 0.025,
     "points": {"ㄱ": [810, 120], "ㄴ": [330, 1410]}
@@ -52,6 +54,8 @@ output/                 사용자용 PDF
   "source_comparison": {
     "artifact": "work/qa/p03-source-redraw-overlay.png",
     "report": "work/qa/p03-source-redraw-overlay.json",
+    "review": "work/qa/p03-source-redraw-review.json",
+    "review_sha256": "...",
     "text_match": true,
     "topology_match": true,
     "line_styles_match": true,
@@ -71,7 +75,7 @@ output/                 사용자용 PDF
 1. 사진 전체를 한 번 읽고 문제 순서와 대략적인 영역을 기록한다.
 2. 문제 단위로 자르고, 도형이 있으면 도형만 별도로 자른다.
 3. 도형 크롭의 그레이스케일, 대비 강화, 이진화 버전을 읽기 좋은 크기로 만든다. 확대 배율은 고정하지 않으며, 원본의 native pixel 간격과 획 굵기를 함께 기록한다. 확대 뒤에도 측정값이 매개변수 변화에 따라 안정되지 않으면 정보 부족으로 판정하고 수치 근거와 함께 재촬영을 요청한다.
-4. 꼭짓점 좌표를 도형 크롭의 픽셀 좌표로 먼저 기록한다. 그 뒤 선분 존재 여부, 점선 주기, 글자 위치와 치수 보조선을 기록한다. SVG 좌표에서 원본 좌표를 역산하면 안 된다.
+4. 꼭짓점 좌표를 도형 크롭의 픽셀 좌표로 별도 관측 JSON에 먼저 기록한다. 그 뒤 모든 선분에 고유 이름과 끝점·실선/점선 역할을 기록하고 원본과 관측 파일의 해시를 고정한다. 그 다음에만 manifest/SVG를 만든다. SVG 좌표에서 원본 좌표를 역산하면 안 된다.
 5. 인쇄선과 손글씨가 섞였으면 획의 직선성·농도·균일성을 비교한다. 판정 근거가 약하면 최종 그림에서 임의로 삭제하지 않는다.
 6. 문제 문장을 읽어 도형이 수행해야 하는 수학적 역할과 대조한다.
 
@@ -86,7 +90,7 @@ output/                 사용자용 PDF
 
 ## 5. 사용자 확인 지점
 
-최종 PDF 전에 도형만 모은 비교표를 만든다. 각 항목에는 원본 크롭, 새 그림, 겹침 이미지, 문제 번호만 둔다. `compare_geometry.py --manifest ... --report ...`로 원본 좌표와 SVG 좌표의 정규화 오차 및 파일 해시를 먼저 기록한다. 수치 게이트가 통과한 항목만 작업자가 수동 검사하고 manifest의 `source_comparison`을 채운다. 최종 PDF를 렌더한 뒤에도 원본 문제 크롭과 문제별로 다시 대조한다. 원본 자체가 정말 판독 불가능한 항목만 사용자에게 확인을 요청한다.
+최종 PDF 전에 도형만 모은 비교표를 만든다. 각 항목에는 원본 크롭, 새 그림, 겹침 이미지, 문제 번호만 둔다. `compare_geometry.py --manifest ... --report ...`로 원본 좌표 오차, 재작도 잉크의 원본 잉크 근접도, 파일 해시를 먼저 기록한다. 수치 게이트가 통과한 항목만 작업자가 수동 검사하고 항목별 review JSON을 만든 뒤 manifest의 `source_comparison`과 같은 값을 기록한다. 여러 항목에 하나의 승인 변수를 복사하지 않는다. 최종 PDF를 렌더한 뒤에도 원본 문제 크롭과 문제별로 다시 대조한다. 원본 자체가 정말 판독 불가능한 항목만 사용자에게 확인을 요청한다.
 
 최종 대조는 `work/qa/delivery.json`에 남기고 납품 검사기를 통과시킨다.
 

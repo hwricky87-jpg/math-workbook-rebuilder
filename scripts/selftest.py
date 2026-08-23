@@ -21,12 +21,14 @@ from compare_geometry import (
     ink_alignment,
     residual_line_report,
     segment_source_support,
+    trace_routing_report,
 )
 from geometry_svg import polygon_on_edge, render_manifest
 from imgprobe import cut_crossings, ring_strands, stability_report
 from preprocess_geometry import inspection_size
 from validate_delivery import validate_delivery_manifest
 from validate_geometry import (
+    component_inventory_report,
     graph_structure,
     svg_fit,
     validate_artifact_evidence,
@@ -458,6 +460,69 @@ def main() -> int:
         and any("invalid render_style" in error for error in invalid_style_report["errors"])
     )
 
+    real_source_coordinate_diagram = {
+        "type": "diagram",
+        "source": {"file": "generic-coordinate-source.png"},
+        "semantic_check": "A real photographed coordinate drawing must not bypass trace verification.",
+        "canvas": {"width": 120, "height": 100},
+        "points": {"A": [20, 20], "B": [100, 80]},
+        "segments": [{"name": "A-B", "from": "A", "to": "B", "style": "solid"}],
+        "verification_evidence": {
+            "kind": "independent-invariant",
+            "description": "The synthetic routing case contains one observed segment.",
+        },
+        "source_comparison": {
+            "artifact": "generic-coordinate-comparison.png",
+            "report": "generic-coordinate-comparison.json",
+            "review": "generic-coordinate-review.json",
+            "review_sha256": "0" * 64,
+            "text_match": True,
+            "topology_match": True,
+            "line_styles_match": True,
+            "labels_match": True,
+            "dimensions_match": True,
+            "projection_match": True,
+            "inspected_latest_render": True,
+        },
+    }
+    real_source_coordinate_diagram_report = validate_manifest(
+        real_source_coordinate_diagram
+    )
+    real_source_coordinate_routing_report = trace_routing_report(
+        real_source_coordinate_diagram
+    )
+    composite_points = {
+        "stage-A": [10, 20], "stage-B": [40, 20],
+        "choice-A": [60, 70], "choice-B": [90, 70],
+    }
+    composite_manifest = {
+        "type": "trace",
+        "source": {"fixture": "synthetic-stage-and-choice-composite"},
+        "semantic_check": "Both the given construction stage and the answer choice are inventoried.",
+        "canvas": {"width": 100, "height": 100},
+        "points": composite_points,
+        "segments": [
+            {"name": "stage-edge", "from": "stage-A", "to": "stage-B", "style": "solid"},
+            {"name": "choice-edge", "from": "choice-A", "to": "choice-B", "style": "solid"},
+        ],
+        "component_inventory": [
+            {"id": "stage", "point_count": 2, "segment_count": 1},
+            {"id": "choice", "point_count": 2, "segment_count": 1},
+        ],
+        "trace_evidence": {
+            "source_size": [100, 100],
+            "max_normalized_error": 0.02,
+            "points": composite_points,
+        },
+        "verification_evidence": {
+            "invariant": {"total_components": 2},
+        },
+    }
+    complete_composite_report = component_inventory_report(composite_manifest)
+    incomplete_composite = json.loads(json.dumps(composite_manifest))
+    incomplete_composite["segments"] = incomplete_composite["segments"][:1]
+    incomplete_composite_report = component_inventory_report(incomplete_composite)
+
     graph_source_path = args.out / "graph-probe-source.png"
     graph_inspection_path = args.out / "graph-probe-inspection.png"
     Image.new("L", (120, 100), 255).save(graph_source_path)
@@ -615,6 +680,20 @@ def main() -> int:
             "trace observation artifact does not exist"
             in trace_without_observation_report["errors"]
         ),
+        "real_source_coordinate_diagram_rejected": (
+            not real_source_coordinate_diagram_report["ok"]
+            and any(
+                "real-source coordinate diagram must use type=trace" in error
+                for error in real_source_coordinate_diagram_report["errors"]
+            )
+        ),
+        "comparison_rejects_generic_coordinate_routing": (
+            not real_source_coordinate_routing_report["ok"]
+        ),
+        "incomplete_composite_inventory_rejected": (
+            bool(incomplete_composite_report)
+            and not incomplete_composite_report["ok"]
+        ),
     }
 
     positive_gates = {
@@ -630,6 +709,9 @@ def main() -> int:
         "aligned_redraw_ink_accepted": ink_alignment_good["ok"],
         "complete_source_line_census_accepted": complete_line_report["ok"],
         "per_segment_source_support_accepted": segment_support_good["ok"],
+        "complete_composite_inventory_accepted": (
+            bool(complete_composite_report) and complete_composite_report["ok"]
+        ),
         "stroke_width_limited_segment_tolerance": (
             stroke_limited_support["radius_px"]
             < stroke_limited_support["nominal_radius_px"]

@@ -27,6 +27,31 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def trace_routing_report(manifest: dict[str, object] | None) -> dict[str, object]:
+    """Reject real-source coordinate drawings routed around trace verification."""
+    errors: list[str] = []
+    if isinstance(manifest, dict):
+        source = manifest.get("source")
+        fixture = isinstance(source, dict) and bool(source.get("fixture"))
+        coordinate_diagram = (
+            manifest.get("type") == "diagram"
+            and isinstance(manifest.get("points"), dict)
+            and bool(manifest.get("points"))
+            and isinstance(manifest.get("segments"), list)
+            and bool(manifest.get("segments"))
+        )
+        if source and not fixture and coordinate_diagram:
+            errors.append(
+                "real-source coordinate diagram must use type=trace; "
+                "generic diagram routing cannot bypass trace verification"
+            )
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "method": "real-source coordinate routing gate",
+    }
+
+
 def rasterize_svg(path: Path, scale: float = 2.0) -> Image.Image:
     renderer = Path(__file__).with_name("render_svg.mjs")
     with tempfile.TemporaryDirectory(prefix="geometry-render-") as directory:
@@ -236,12 +261,53 @@ def segment_source_support(
     prepared_source = source_evidence or SourceEvidence.prepare(source)
     if prepared_source.size != source.size:
         raise ValueError("source evidence does not match the source size")
-    distance_to_ink = prepared_source.distance_to_ink()
     diagonal = math.hypot(*source.size)
     nominal_radius = max(2, int(round(diagonal * radius_ratio)))
     source_stroke_width = prepared_source.estimated_stroke_width()
     stroke_radius = max(2, int(round(source_stroke_width * 2 + 1)))
     radius = min(nominal_radius, stroke_radius)
+
+    # A whole-page Otsu threshold can suppress a faint printed edge that is
+    # stable in its own crop. Add only segment-local native-pixel evidence,
+    # capped close to the global threshold, before computing the shared
+    # distance field. This is deterministic contrast assistance, not generated
+    # super-resolution: no coordinates or pixels are invented.
+    source_gray = np.asarray(
+        source.convert("L").filter(ImageFilter.MedianFilter(3)), dtype=np.uint8
+    )
+    support_mask = prepared_source.mask.copy()
+    local_thresholds: dict[str, int] = {}
+    local_margin = max(6, radius * 3)
+    for segment in manifest.get("segments", []):
+        if not isinstance(segment, dict) or segment.get("style", "solid") not in {
+            "solid", "emphasis"
+        }:
+            continue
+        start = points.get(segment.get("from"))
+        end = points.get(segment.get("to"))
+        if (
+            not isinstance(start, list) or len(start) != 2
+            or not isinstance(end, list) or len(end) != 2
+        ):
+            continue
+        x0 = max(0, int(math.floor(min(float(start[0]), float(end[0])))) - local_margin)
+        y0 = max(0, int(math.floor(min(float(start[1]), float(end[1])))) - local_margin)
+        x1 = min(source.width, int(math.ceil(max(float(start[0]), float(end[0])))) + local_margin + 1)
+        y1 = min(source.height, int(math.ceil(max(float(start[1]), float(end[1])))) + local_margin + 1)
+        patch = source_gray[y0:y1, x0:x1]
+        if patch.size == 0:
+            continue
+        local_otsu = _otsu_threshold(Image.fromarray(patch, mode="L"))
+        local_threshold = max(
+            prepared_source.threshold,
+            min(local_otsu, prepared_source.threshold + 12),
+        )
+        name = str(segment.get("name", f"{segment.get('from')}-{segment.get('to')}"))
+        local_thresholds[name] = local_threshold
+        support_mask[y0:y1, x0:x1] |= patch <= local_threshold
+    distance_to_ink = cv2.distanceTransform(
+        1 - support_mask.astype(np.uint8), cv2.DIST_L2, 5
+    )
 
     records: list[dict[str, object]] = []
     for segment in manifest.get("segments", []):
@@ -306,6 +372,8 @@ def segment_source_support(
         "applied": True,
         "method": "per-solid-segment narrow source support",
         "source_threshold": prepared_source.threshold,
+        "threshold_method": "global Otsu plus segment-local native-pixel Otsu capped at global+12",
+        "segment_local_thresholds": local_thresholds,
         "estimated_source_stroke_width_px": source_stroke_width,
         "radius_ratio": radius_ratio,
         "nominal_radius_px": nominal_radius,
@@ -466,6 +534,7 @@ def main() -> int:
         source = source.crop(tuple(args.box))
     redraw = rasterize_svg(args.redraw) if args.redraw.suffix.lower() == ".svg" else Image.open(args.redraw).convert("RGB")
     manifest = json.loads(args.manifest.read_text(encoding="utf-8")) if args.manifest else None
+    routing = trace_routing_report(manifest)
     prepared_source = SourceEvidence.prepare(source)
     prepared_redraw = RedrawEvidence.prepare(redraw, source.size)
     trace = trace_alignment(manifest) if manifest else None
@@ -494,7 +563,7 @@ def main() -> int:
     source_panel, redraw_panel = fit_panel(source, size), fit_panel(redraw, size)
     overlay = Image.blend(source_panel, redraw_panel, 0.5)
 
-    label_height = 102 if trace else 70
+    label_height = 102 if trace or not routing["ok"] else 70
     sheet = Image.new("RGB", (args.width * 3, args.height + label_height), "white")
     draw = ImageDraw.Draw(sheet)
     font = ImageFont.load_default()
@@ -516,10 +585,18 @@ def main() -> int:
             fill="#176b3a" if trace.get("ok") else "#b42318",
             font=font,
         )
+    if not routing["ok"]:
+        draw.text(
+            (args.width * 2 + 10, 30),
+            "ROUTING=FAIL USE type=trace",
+            fill="#b42318",
+            font=font,
+        )
+    metric_y = 46 if trace or not routing["ok"] else 30
     ink_coverage = ink["coverage_by_radius"][str(ink["maximum_radius_px"])]
     ink_status = "PASS" if ink["ok"] else "FAIL"
     draw.text(
-        (args.width * 2 + 10, 46 if trace else 30),
+        (args.width * 2 + 10, metric_y),
         f"INK={ink_coverage:.4f} LIMIT={ink['minimum_coverage']:.4f} {ink_status}",
         fill="#176b3a" if ink["ok"] else "#b42318",
         font=font,
@@ -527,7 +604,7 @@ def main() -> int:
     residual_status = "PASS" if residual["ok"] else "FAIL"
     residual_count = len(residual["candidates"])
     draw.text(
-        (args.width * 2 + 10, 62 if trace else 46),
+        (args.width * 2 + 10, metric_y + 16),
         f"MISSING-LINE={residual_count} {residual_status}",
         fill="#176b3a" if residual["ok"] else "#b42318",
         font=font,
@@ -537,7 +614,7 @@ def main() -> int:
         1 for item in segment_support["segments"] if not item.get("ok")
     )
     draw.text(
-        (args.width * 2 + 10, 78 if trace else 62),
+        (args.width * 2 + 10, metric_y + 32),
         f"UNSUPPORTED-SEGMENT={unsupported_count} {segment_status}",
         fill="#176b3a" if segment_support["ok"] else "#b42318",
         font=font,
@@ -547,7 +624,8 @@ def main() -> int:
     sheet.save(args.out)
     result = {
         "ok": bool(
-            (trace is None or trace.get("ok"))
+            routing.get("ok")
+            and (trace is None or trace.get("ok"))
             and ink.get("ok")
             and residual.get("ok")
             and segment_support.get("ok")
@@ -567,6 +645,7 @@ def main() -> int:
             "estimated_source_stroke_width_px": prepared_source.estimated_stroke_width(),
         },
         "trace": trace,
+        "trace_routing": routing,
         "ink_alignment": ink,
         "source_residual": residual,
         "segment_source_support": segment_support,

@@ -23,6 +23,7 @@ Create a faithful, pleasant worksheet without changing the mathematical problem.
 4. Select the renderer:
    - Use the installed `geometry-dsl` skill when available for plane geometry based on points, lines, circles, arcs, intersections, perpendiculars, and regions. If it is unavailable, use `scripts/geometry_svg.py` for supported diagrams and do not invent unsupported constructions.
    - Use `scripts/geometry_svg.py` for coordinate-traced workbook diagrams, prisms, nets, lattices, routes, and irregular textbook projections.
+   - Any real-source figure encoded with explicit point and segment coordinates must use `type: trace`; `type: diagram` is not an allowed escape from landmark, residual, or per-segment source checks. For a problem containing a construction sequence, alternatives, or separated subfigures, inventory every component before drawing, verify each component separately, and also build one whole-problem comparison proving that no component was omitted.
    - Use a narrowly cleaned source crop only after recording why vector reconstruction is unsafe.
 5. Draw topology first, then line style, then fills, labels, and dimensions. Use the print-readable default style and inspect it at the intended PDF size; a per-manifest `render_style` override is only for genuinely crowded or unusually scaled figures. Read [geometry-redraw.md](references/geometry-redraw.md) for all nontrivial figures.
 6. Validate the manifest and SVG with `scripts/validate_geometry.py`. Record `verification_evidence` whose provenance is outside the values being reconstructed: an external answer, independent invariant, independent measurement, or explicit user confirmation. A tidy result calculated from the same reading is only a plausibility hint, never an expectation gate. Treat handwriting as evidence only after its reliability is established. For multigraphs, require current-source probe reports, complete measured degrees, edge-cut multiplicities, the handshake invariant, and a one-to-one count of drawn strands.
@@ -37,6 +38,7 @@ A diagram is complete only when all of these are true:
 - The problem text and the geometry agree.
 - Every explicit trace point has a recorded source-pixel landmark, and the normalized landmark error is at most `0.04` (normally `0.02`–`0.03`).
 - The trace landmarks and named segment/style inventory come unchanged from a separate, source-hashed observation artifact.
+- A multi-stage or multi-choice problem has a complete component inventory, passing per-component evidence, and a whole-problem source comparison; verifying only its answer choices or only its given figure is incomplete.
 - All required incidences and internal segments are present.
 - A blind, face-by-face segment census has accounted for every source stroke, including internal diagonals not named in the problem text or prior feedback.
 - Every declared solid or emphasized straight segment has sustained native-source support at a narrow tolerance; a nearby polyline or crossing cannot validate an unsupported chord.

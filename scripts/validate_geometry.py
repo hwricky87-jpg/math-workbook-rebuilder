@@ -730,6 +730,61 @@ def _path_points(data: str, steps: int = 12) -> list[tuple[float, float]]:
     return points
 
 
+def component_inventory_report(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate declared stage/choice components against namespaced geometry."""
+    inventory = manifest.get("component_inventory")
+    if inventory is None:
+        return None
+    errors: list[str] = []
+    if not isinstance(inventory, list) or not inventory:
+        return {"ok": False, "errors": ["component_inventory must be a non-empty list"], "components": []}
+    points = manifest.get("points", {})
+    segments = manifest.get("segments", [])
+    point_names = set(points) if isinstance(points, dict) else set()
+    segment_names = {
+        str(item.get("name"))
+        for item in segments
+        if isinstance(item, dict) and item.get("name")
+    } if isinstance(segments, list) else set()
+    seen: set[str] = set()
+    records: list[dict[str, Any]] = []
+    for item in inventory:
+        if not isinstance(item, dict) or not item.get("id"):
+            errors.append("every component inventory entry requires an id")
+            continue
+        component_id = str(item["id"])
+        if component_id in seen:
+            errors.append(f"duplicate component id: {component_id}")
+            continue
+        seen.add(component_id)
+        prefix = f"{component_id}-"
+        actual_points = sum(1 for name in point_names if name.startswith(prefix))
+        actual_segments = sum(1 for name in segment_names if name.startswith(prefix))
+        expected_points = int(item.get("point_count", -1))
+        expected_segments = int(item.get("segment_count", -1))
+        if expected_points <= 0 or actual_points != expected_points:
+            errors.append(
+                f"component {component_id} point_count={actual_points}, expected={expected_points}"
+            )
+        if expected_segments <= 0 or actual_segments != expected_segments:
+            errors.append(
+                f"component {component_id} segment_count={actual_segments}, expected={expected_segments}"
+            )
+        records.append({
+            "id": component_id,
+            "point_count": actual_points,
+            "segment_count": actual_segments,
+        })
+    verification = manifest.get("verification_evidence", {})
+    invariant = verification.get("invariant", {}) if isinstance(verification, dict) else {}
+    expected_total = invariant.get("total_components") if isinstance(invariant, dict) else None
+    if expected_total is not None and int(expected_total) != len(seen):
+        errors.append(
+            f"component inventory has {len(seen)} entries, independently expected {int(expected_total)}"
+        )
+    return {"ok": not errors, "errors": errors, "components": records}
+
+
 def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -811,6 +866,17 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     if source and not fixture:
         if not isinstance(source, dict) or not any(source.get(key) for key in ("file", "crop", "image")):
             errors.append("source must identify the original file or crop")
+        if (
+            kind == "diagram"
+            and isinstance(manifest.get("points"), dict)
+            and bool(manifest.get("points"))
+            and isinstance(manifest.get("segments"), list)
+            and bool(manifest.get("segments"))
+        ):
+            errors.append(
+                "real-source coordinate diagram must use type=trace; "
+                "type=diagram cannot bypass landmark and per-segment source checks"
+            )
         comparison = manifest.get("source_comparison")
         if not isinstance(comparison, dict):
             errors.append("source_comparison is required for a real source image")
@@ -839,6 +905,10 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     verification = verification_report(manifest, fixture)
     errors.extend(verification["errors"])
 
+    components = component_inventory_report(manifest)
+    if components:
+        errors.extend(components["errors"])
+
     graph = graph_structure(manifest)
     if graph:
         errors.extend(graph["errors"])
@@ -857,6 +927,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "trace": trace,
         "segments": segment_report,
         "verification": verification,
+        "components": components,
     }
 
 
