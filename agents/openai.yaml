@@ -1,0 +1,8 @@
+interface:
+  display_name: "수학 문제지 정밀 재제작"
+  short_description: "사진 속 수학 문제를 원본 대조와 검증을 거쳐 재제작"
+  brand_color: "#6F72D9"
+  default_prompt: "Use $math-workbook-rebuilder to rebuild these photographed math problems as a source-verified worksheet PDF."
+
+policy:
+  allow_implicit_invocation: true

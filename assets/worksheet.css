@@ -1,0 +1,85 @@
+@page {
+  size: A4;
+  margin: 13mm 14mm 15mm;
+}
+
+:root {
+  --ink: #28334a;
+  --muted: #6f7787;
+  --line: #dce3ee;
+  --accent: #6f72d9;
+  --accent-soft: #f1f0ff;
+  --paper: #ffffff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  font-size: 10.5pt;
+  line-height: 1.62;
+  word-break: keep-all;
+}
+
+.page { break-after: page; }
+.page:last-child { break-after: auto; }
+
+.problem {
+  position: relative;
+  margin: 0 0 6mm;
+  padding: 6mm 6.5mm 5.5mm;
+  border: 0.6pt solid var(--line);
+  border-radius: 5mm;
+  break-inside: avoid;
+}
+
+.problem-number {
+  display: inline-flex;
+  min-width: 9mm;
+  height: 7mm;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 3mm;
+  padding: 0 3mm;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.problem-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(48mm, 0.72fr);
+  gap: 7mm;
+  align-items: start;
+}
+
+.problem-body.no-figure { display: block; }
+
+.figure {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42mm;
+}
+
+.figure svg, .figure img {
+  display: block;
+  max-width: 100%;
+  max-height: 76mm;
+  object-fit: contain;
+}
+
+.answer-space {
+  min-height: 15mm;
+  margin-top: 4mm;
+  border-bottom: 0.7pt solid #aeb8c8;
+}
+
+@media print {
+  body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
