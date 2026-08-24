@@ -16,6 +16,7 @@
 - SVG 좌표는 원본 픽셀 좌표를 일정 비율로 정규화해 만든다. 원본이 비대칭이거나 눌려 보이면 그 투영을 그대로 보존하며, 정다각형답게 보이도록 대칭화하거나 등간격화하지 않는다.
 - 한 점을 고치면 연결된 선이 함께 움직이도록 점 이름을 공유한다.
 - 곡선은 시작점·끝점과 중간 관측점 3개 이상을 기록한다. 자연스러운 곡선은 5개 안팎의 점을 `smooth path`로 잇거나 2차·3차 베지어로 근사한다.
+- 자동 미세보정은 위상·선 역할을 먼저 확정한 뒤 공유 점을 작은 native-pixel 반경 안에서 원본 잉크 중심으로 옮기는 후보 생성에만 쓴다. `refine_trace.py`의 전·후 overlay와 landmark 확대판을 실제로 본 뒤 승인한다. 승인된 후보는 새 observation artifact와 SHA로 명시적으로 채택하고 manifest·comparison·visual review를 모두 갱신한다. 후보 생성 자체는 승인이 아니다.
 - 선 하나가 가려져 보이지 않는지, 실제로 없는지 문제 문장과 인접 면을 이용해 확인한다.
 
 ### Trace evidence 하드 게이트
@@ -30,19 +31,24 @@
     "observation_artifact": "../inspection/p03/source-observation.json",
     "observation_sha256": "...",
     "source_size": [2400, 1800],
+    "source_geometry_roi": [120, 80, 2280, 1710],
     "max_normalized_error": 0.025,
     "points": {"A": [810, 120], "B": [330, 1410]}
   }
 }
 ```
 
+위 ROI는 manifest보다 먼저 만든 observation JSON에 `source_geometry_roi`와 `source_geometry_roi_method`를 함께 기록한 뒤, `trace_evidence.source_geometry_roi`로 값 변경 없이 복사한다. 검사기는 method를 observation에서 읽으며 trace에만 적힌 method는 독립 관측 근거가 아니다.
+
 - `source_size`는 비교에 실제 사용한 크롭 파일의 픽셀 크기와 같아야 한다.
 - `observation_artifact`는 manifest와 별개의 JSON이어야 하며 현재 원본 해시·크기, 픽셀 꼭짓점, 이름 있는 선분 목록(`from`, `to`, `style`)을 먼저 기록한다. manifest 좌표를 만든 뒤 이 파일을 역으로 생성하면 안 된다.
 - 관측 JSON의 점과 선분 이름·끝점·스타일은 manifest와 일대일로 일치해야 하며 해시가 달라지면 즉시 실패한다.
+- 관측 JSON의 모든 선분 이름은 `required_segments` 및 manifest 선분 이름과 정확히 같아야 한다. 곡선은 `required_curves`, 직각표시·눈금·짧은 표시선은 `required_markers`, 라벨·치수는 각 stable name과 anchor가 manifest에 일대일로 일치해야 한다. Marker는 렌더되지만 구조 segment나 위상 계산에는 넣지 않는다.
+- `source_geometry_roi`는 원본을 먼저 보고 분리된 모든 구성요소를 포함하도록 정한다. trace points의 hull이나 재작도 bbox에서 만들면 독립 관측이 아니다.
 - 모든 명시적 SVG 점에 원본 픽셀 좌표가 있어야 한다.
 - 관측 선분 목록을 만들 때 알려진 오류나 문제 문구만 따라가지 않는다. 외곽선을 한 바퀴 센 뒤 각 면을 순서대로 훑어 내부선·대각선·숨은선을 별도로 세고, 마지막에는 라벨을 가린 채 원본 잉크와 목록을 역대조한다.
 - 잔차 검출기가 반환한 선 조각을 가까운 두 꼭짓점까지 자동 연장하지 않는다. 조각의 실제 끝·교차·접합 위치를 native crop에서 찾고, 후보 전체 선분을 좁은 반경으로 표본화해 연속 지지를 확인한다.
-- 재작도→원본 전체 검사는 광범위한 추가·이탈선을, 원본→재작도 긴 직선 잔차 검사는 누락선을, 선분별 좁은 원본 지지 검사는 주변 선에 숨어든 가짜 현을 잡는다. 하나라도 실패하면 좌표 오차가 0이어도 완성으로 보지 않는다.
+- 재작도→원본 전체 검사는 광범위한 추가·이탈선을, source-first ROI와 전체 native crop의 원본→재작도 잔차 검사는 누락선을, 선분별 좁은 원본 지지 검사는 주변 선에 숨어든 가짜 현을 잡는다. `--diagnostic-out`의 빨강/파랑 차이와 `R#` 후보를 원본과 함께 직접 본다. 하나라도 실패하면 좌표 오차가 0이어도 완성으로 보지 않는다.
 - 원본과 SVG 좌표를 각 프레임의 너비·높이로 정규화한 뒤 점별 거리를 계산한다.
 - 최대 정규화 오차는 `0.04`를 넘을 수 없고, 일반적인 목표는 `0.02`–`0.03`이다.
 - 임계값을 키워 실패를 통과시키지 않는다. 오차가 크면 원본 좌표 판독 또는 SVG 투영으로 돌아간다.

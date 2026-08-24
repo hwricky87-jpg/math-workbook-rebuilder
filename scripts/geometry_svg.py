@@ -279,6 +279,20 @@ class SVGDocument:
             f'<path class="{html.escape(css_class)}" d="{d}" {presentation} style="{style}"{name_attr}/>'
         )
 
+    def marker(self, points: list[Point], kind: str, css_class: str = "solid",
+               name: str | None = None) -> None:
+        """Draw a semantic marker path that downstream checks can exclude from topology."""
+        if len(points) < 2:
+            raise ValueError("a marker needs at least two points")
+        d = "M " + " L ".join(f"{_num(x)} {_num(y)}" for x, y in points)
+        name_attr = f' data-name="{html.escape(name)}"' if name else ""
+        style = self.inline_style.get(css_class, self.inline_style["solid"])
+        presentation = self.presentation.get(css_class, self.presentation["solid"])
+        self.items.append(
+            f'<path class="marker {html.escape(css_class)}" data-marker-kind="{html.escape(kind)}" '
+            f'd="{d}" {presentation} style="{style}"{name_attr}/>'
+        )
+
     def text(self, point: Point, content: str, css_class: str = "label", anchor: str = "middle",
              name: str | None = None) -> None:
         name_attr = f' data-name="{html.escape(name)}"' if name else ""
@@ -322,6 +336,90 @@ def _resolve_point(value: Any, points: dict[str, Point]) -> Point:
     if isinstance(value, (list, tuple)) and len(value) == 2:
         return float(value[0]), float(value[1])
     raise TypeError(f"invalid point: {value!r}")
+
+
+MARKER_KINDS = {"right-angle", "tick", "short-polyline"}
+MARKER_STYLES = {"solid", "dashed", "guide", "emphasis"}
+
+
+def resolve_marker_points(marker: dict[str, Any], points: dict[str, Point]) -> list[Point]:
+    """Resolve a visual marker without adding it to the structural edge graph.
+
+    ``right-angle`` markers accept either an explicit three-point polyline or an
+    ``at`` point plus two arm endpoints. ``tick`` and ``short-polyline`` markers
+    deliberately require explicit observed points so a renderer never guesses
+    their orientation or placement.
+    """
+    if not isinstance(marker, dict):
+        raise TypeError("marker must be an object")
+    name = marker.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("marker requires a non-empty name")
+    kind = marker.get("kind")
+    if kind not in MARKER_KINDS:
+        allowed = ", ".join(sorted(MARKER_KINDS))
+        raise ValueError(f"marker {name} kind must be one of: {allowed}")
+    style = marker.get("style", "solid")
+    if style not in MARKER_STYLES:
+        allowed = ", ".join(sorted(MARKER_STYLES))
+        raise ValueError(f"marker {name} style must be one of: {allowed}")
+
+    explicit = marker.get("points")
+    has_constructed_form = marker.get("at") is not None or marker.get("arms") is not None
+    if explicit is not None and has_constructed_form:
+        raise ValueError(f"marker {name} cannot mix points with at/arms")
+
+    if explicit is not None:
+        if not isinstance(explicit, list):
+            raise TypeError(f"marker {name} points must be a list")
+        expected = 3 if kind == "right-angle" else None
+        if expected is not None and len(explicit) != expected:
+            raise ValueError(f"marker {name} right-angle points must contain exactly 3 points")
+        if expected is None and len(explicit) < 2:
+            raise ValueError(f"marker {name} points must contain at least 2 points")
+        resolved = [_resolve_point(value, points) for value in explicit]
+    elif kind == "right-angle":
+        if marker.get("at") is None:
+            raise ValueError(f"marker {name} right-angle requires points or at/arms")
+        arms = marker.get("arms")
+        if not isinstance(arms, list) or len(arms) != 2:
+            raise ValueError(f"marker {name} arms must contain exactly 2 endpoints")
+        at = _resolve_point(marker["at"], points)
+        arm_points = [_resolve_point(value, points) for value in arms]
+        raw_size = marker.get("size", 10.0)
+        if isinstance(raw_size, bool) or not isinstance(raw_size, (int, float)):
+            raise TypeError(f"marker {name} size must be numeric")
+        size = float(raw_size)
+        if not math.isfinite(size) or size <= 0:
+            raise ValueError(f"marker {name} size must be positive and finite")
+        unit: list[Point] = []
+        for arm_index, endpoint in enumerate(arm_points, start=1):
+            dx, dy = endpoint[0] - at[0], endpoint[1] - at[1]
+            length = math.hypot(dx, dy)
+            if length <= 1e-9:
+                raise ValueError(f"marker {name} arm {arm_index} has zero length")
+            unit.append((dx / length, dy / length))
+        if abs(unit[0][0] * unit[1][1] - unit[0][1] * unit[1][0]) <= 1e-6:
+            raise ValueError(f"marker {name} arms must not be collinear")
+        # The vertex itself is intentionally not stroked: this is the familiar
+        # three-point square-corner glyph inside the two observed rays.
+        resolved = [
+            (at[0] + unit[0][0] * size, at[1] + unit[0][1] * size),
+            (
+                at[0] + (unit[0][0] + unit[1][0]) * size,
+                at[1] + (unit[0][1] + unit[1][1]) * size,
+            ),
+            (at[0] + unit[1][0] * size, at[1] + unit[1][1] * size),
+        ]
+    else:
+        raise ValueError(f"marker {name} {kind} requires explicit points")
+
+    if not all(math.isfinite(value) for point in resolved for value in point):
+        raise ValueError(f"marker {name} points must be finite")
+    for left, right in zip(resolved, resolved[1:]):
+        if math.dist(left, right) <= 1e-9:
+            raise ValueError(f"marker {name} contains a zero-length stroke")
+    return resolved
 
 
 def _resolved_face(face: Any, points: dict[str, Point]) -> list[Point]:
@@ -437,6 +535,28 @@ def render_manifest(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             curve.get("name"),
         )
 
+    marker_kinds: dict[str, int] = defaultdict(int)
+    marker_names: set[str] = set()
+    raw_markers = manifest.get("markers", [])
+    if not isinstance(raw_markers, list):
+        raise TypeError("markers must be a list")
+    for marker in raw_markers:
+        if not isinstance(marker, dict):
+            raise TypeError("marker must be an object")
+        name = marker.get("name")
+        if isinstance(name, str) and name in marker_names:
+            raise ValueError(f"duplicate marker name: {name}")
+        if isinstance(name, str):
+            marker_names.add(name)
+        marker_points = resolve_marker_points(marker, points)
+        doc.marker(
+            marker_points,
+            str(marker["kind"]),
+            str(marker.get("style", "solid")),
+            str(marker["name"]),
+        )
+        marker_kinds[str(marker["kind"])] += 1
+
     for point_name in manifest.get("dots", []):
         doc.dot(_resolve_point(point_name, points))
 
@@ -454,6 +574,8 @@ def render_manifest(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
     report["points"] = len(points)
     report["segments"] = len(manifest.get("segments", []))
+    report["markers"] = len(raw_markers)
+    report["marker_kinds"] = dict(sorted(marker_kinds.items()))
     report["labels"] = len(manifest.get("labels", []))
     return doc.serialize(), report
 

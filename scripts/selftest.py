@@ -28,11 +28,23 @@ from imgprobe import cut_crossings, ring_strands, stability_report
 from preprocess_geometry import (
     coordinate_grid,
     coordinate_grid_step,
+    edge_stroke_report,
     inspection_size,
     sheet_preview_size,
 )
 from process_utils import run_utf8
+from refine_trace import all_metrics, draw_overlay, refine_points, source_distance
+from build_visual_review import make_landmark_sheet, make_main_sheet
+from qa_pdf import inspect_pdf
+from compare_pdf_scope import compare_pdf_scope
+from validate_inventory import validate_inventory
+from build_observation_overlay import render_overlay as render_observation_overlay
 from validate_delivery import validate_delivery_manifest
+from validate_visual_review import (
+    GEOMETRY_ARTIFACTS,
+    GEOMETRY_CHECKS,
+    validate_visual_review,
+)
 from validate_geometry import (
     component_inventory_report,
     graph_structure,
@@ -262,19 +274,105 @@ def main() -> int:
 
     pdf_path = args.out / "selftest-delivery.pdf"
     with pymupdf.open() as document:
-        document.new_page()
+        page = document.new_page()
+        page.insert_text((72, 72), "source-verified fixture", fontsize=12)
         document.save(pdf_path)
-    qa_path = args.out / "selftest-pdf-qa.json"
-    qa_path.write_text(json.dumps({"ok": True}), encoding="utf-8")
+    qa_dir = args.out / "selftest-pdf-qa"
+    pdf_qa = inspect_pdf(pdf_path, qa_dir, dpi=130, min_margin_pt=10.0)
+    qa_path = qa_dir / "qa-report.json"
+    qa_path.write_text(json.dumps(pdf_qa, ensure_ascii=False, indent=2), encoding="utf-8")
+    pdf_hash = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    sheet_hash = hashlib.sha256(sheet_path.read_bytes()).hexdigest()
+    final_page_render = qa_dir / str(pdf_qa["pages"][0]["render"])
+    final_page_render_hash = hashlib.sha256(final_page_render.read_bytes()).hexdigest()
+    with Image.open(final_page_render) as opened:
+        final_page_size = opened.size
+    delivery_inventory_path = args.out / "selftest-delivery-inventory.json"
+    delivery_inventory_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "source": {
+                    "file": sheet_path.name,
+                    "sha256": sheet_hash,
+                    "page_count": 1,
+                },
+                "item_count": 1,
+                "items": [{
+                    "id": "fixture-01",
+                    "order": 1,
+                    "type": "example",
+                    "source_page": 1,
+                    "problem_box": [0, 0, 100, 100],
+                    "has_text": True,
+                    "has_figure": False,
+                }],
+                "page_accounts": [],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    delivery_inventory_hash = hashlib.sha256(
+        delivery_inventory_path.read_bytes()
+    ).hexdigest()
+    delivery_review_path = args.out / "selftest-delivery-visual-review.json"
+    delivery_review_files = {
+        name: (
+            final_page_render
+            if name == "final_crop"
+            else sheet_path
+        )
+        for name in GEOMETRY_ARTIFACTS + ("final_crop",)
+    }
+    delivery_review = {
+        "id": "fixture-01",
+        "status": "approved",
+        "reviewer": "selftest-delivery-vision-reviewer",
+        "review_method": "Opened both PNGs in the image viewer at original detail.",
+        "artifacts": {
+            name: {
+                "file": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for name, path in delivery_review_files.items()
+        },
+        "checks": {
+            **{name: True for name in GEOMETRY_CHECKS},
+            "final_pdf_scale_and_spacing_are_suitable": True,
+        },
+        "issues": [],
+    }
+    delivery_review_path.write_text(
+        json.dumps(delivery_review, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    delivery_review_hash = hashlib.sha256(delivery_review_path.read_bytes()).hexdigest()
     delivery = {
+        "schema_version": 2,
+        "status": "verified",
         "pdf": str(pdf_path),
+        "pdf_sha256": pdf_hash,
         "pdf_qa_report": str(qa_path),
+        "source_inventory": {
+            "path": str(delivery_inventory_path),
+            "sha256": delivery_inventory_hash,
+        },
         "all_pages_inspected": True,
         "problems": [{
             "id": "fixture-01",
+            "status": "verified",
+            "pdf_sha256": pdf_hash,
             "source_crop": str(sheet_path),
+            "source_crop_sha256": sheet_hash,
             "comparison_artifact": str(sheet_path),
-            "final_page_render": str(sheet_path),
+            "comparison_artifact_sha256": sheet_hash,
+            "final_page_render": str(final_page_render),
+            "final_page_render_sha256": final_page_render_hash,
+            "final_problem_crop": str(final_page_render),
+            "final_problem_crop_sha256": final_page_render_hash,
+            "final_problem_box": [0, 0, final_page_size[0], final_page_size[1]],
+            "visual_review": str(delivery_review_path),
+            "visual_review_sha256": delivery_review_hash,
             "final_page": 1,
             "text_match": True,
             "figure_match": True,
@@ -289,6 +387,178 @@ def main() -> int:
     bad_delivery = json.loads(json.dumps(delivery))
     bad_delivery["problems"][0]["figure_match"] = False
     bad_delivery_report = validate_delivery_manifest(bad_delivery, args.out)
+    stale_delivery = json.loads(json.dumps(delivery))
+    stale_delivery["pdf_sha256"] = "0" * 64
+    stale_delivery_report = validate_delivery_manifest(stale_delivery, args.out)
+    missing_visual_review_delivery = json.loads(json.dumps(delivery))
+    del missing_visual_review_delivery["problems"][0]["visual_review"]
+    missing_visual_review_report = validate_delivery_manifest(
+        missing_visual_review_delivery, args.out
+    )
+    stale_final_crop_delivery = json.loads(json.dumps(delivery))
+    stale_final_crop_delivery["problems"][0]["final_problem_crop_sha256"] = "0" * 64
+    stale_final_crop_report = validate_delivery_manifest(stale_final_crop_delivery, args.out)
+    unrelated_final_crop = args.out / "selftest-unrelated-final-crop.png"
+    Image.new("RGB", (24, 24), "#db3a34").save(unrelated_final_crop)
+    unrelated_final_crop_hash = hashlib.sha256(
+        unrelated_final_crop.read_bytes()
+    ).hexdigest()
+    unrelated_review = json.loads(json.dumps(delivery_review))
+    unrelated_review["artifacts"]["final_crop"] = {
+        "file": str(unrelated_final_crop),
+        "sha256": unrelated_final_crop_hash,
+    }
+    unrelated_review_path = args.out / "selftest-unrelated-final-crop-review.json"
+    unrelated_review_path.write_text(
+        json.dumps(unrelated_review, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    unrelated_delivery = json.loads(json.dumps(delivery))
+    unrelated_problem = unrelated_delivery["problems"][0]
+    unrelated_problem["final_problem_crop"] = str(unrelated_final_crop)
+    unrelated_problem["final_problem_crop_sha256"] = unrelated_final_crop_hash
+    unrelated_problem["visual_review"] = str(unrelated_review_path)
+    unrelated_problem["visual_review_sha256"] = hashlib.sha256(
+        unrelated_review_path.read_bytes()
+    ).hexdigest()
+    unrelated_final_crop_report = validate_delivery_manifest(unrelated_delivery, args.out)
+
+    # A hash-bound crop and its own approved review still cannot prove a
+    # problem was inspected when the declared region is only a single white
+    # pixel from the current QA render.
+    with Image.open(final_page_render) as opened:
+        page_rgb = np.asarray(opened.convert("RGB"))
+    white_pixels = np.argwhere(np.all(page_rgb == 255, axis=2))
+    if white_pixels.size == 0:
+        raise RuntimeError("selftest QA render unexpectedly contains no white pixel")
+    tiny_y, tiny_x = (int(value) for value in white_pixels[0])
+    tiny_final_crop = args.out / "selftest-tiny-final-crop.png"
+    Image.fromarray(page_rgb[tiny_y : tiny_y + 1, tiny_x : tiny_x + 1]).save(
+        tiny_final_crop
+    )
+    tiny_final_crop_hash = hashlib.sha256(tiny_final_crop.read_bytes()).hexdigest()
+    tiny_review = json.loads(json.dumps(delivery_review))
+    tiny_review["artifacts"]["final_crop"] = {
+        "file": str(tiny_final_crop),
+        "sha256": tiny_final_crop_hash,
+    }
+    tiny_review_path = args.out / "selftest-tiny-final-crop-review.json"
+    tiny_review_path.write_text(
+        json.dumps(tiny_review, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    tiny_delivery = json.loads(json.dumps(delivery))
+    tiny_problem = tiny_delivery["problems"][0]
+    tiny_problem["final_problem_crop"] = str(tiny_final_crop)
+    tiny_problem["final_problem_crop_sha256"] = tiny_final_crop_hash
+    tiny_problem["final_problem_box"] = [tiny_x, tiny_y, tiny_x + 1, tiny_y + 1]
+    tiny_problem["visual_review"] = str(tiny_review_path)
+    tiny_problem["visual_review_sha256"] = hashlib.sha256(
+        tiny_review_path.read_bytes()
+    ).hexdigest()
+    tiny_final_crop_report = validate_delivery_manifest(tiny_delivery, args.out)
+
+    missing_final_problem_box_delivery = json.loads(json.dumps(delivery))
+    del missing_final_problem_box_delivery["problems"][0]["final_problem_box"]
+    missing_final_problem_box_report = validate_delivery_manifest(
+        missing_final_problem_box_delivery, args.out
+    )
+
+    # Workbook-level inventory prevents the early failure mode where examples
+    # or concept explorations disappear while the remaining pages still look
+    # internally consistent.
+    inventory_source = args.out / "inventory-source.bin"
+    inventory_source.write_bytes(b"two-page-source-fixture")
+    inventory_hash = hashlib.sha256(inventory_source.read_bytes()).hexdigest()
+    inventory = {
+        "schema_version": "1.0",
+        "source": {
+            "file": inventory_source.name,
+            "sha256": inventory_hash,
+            "page_count": 2,
+        },
+        "items": [
+            {
+                "id": "concept-1", "order": 1, "type": "concept_exploration",
+                "source_page": 1, "problem_box": [0, 0, 100, 100],
+                "has_text": True, "has_figure": False,
+            },
+            {
+                "id": "example-1", "order": 2, "type": "example",
+                "source_page": 2, "problem_box": [0, 0, 100, 100],
+                "has_text": True, "has_figure": False,
+            },
+        ],
+        "page_accounts": [],
+    }
+    inventory_report = validate_inventory(inventory, args.out)
+    omitted_inventory = json.loads(json.dumps(inventory))
+    omitted_inventory["items"] = omitted_inventory["items"][:1]
+    omitted_inventory_report = validate_inventory(omitted_inventory, args.out)
+
+    clipped_crop = Image.new("L", (120, 80), 255)
+    ImageDraw.Draw(clipped_crop).line((0, 40, 70, 40), fill=20, width=3)
+    contained_crop = Image.new("L", (120, 80), 255)
+    ImageDraw.Draw(contained_crop).line((12, 40, 70, 40), fill=20, width=3)
+    clipped_crop_report = edge_stroke_report(clipped_crop)
+    contained_crop_report = edge_stroke_report(contained_crop)
+
+    observation_source = Image.new("RGB", (220, 170), "white")
+    observation_points = {
+        "A": [108, 24], "B": [34, 141], "C": [190, 143], "D": [109, 99]
+    }
+    observation_segments = [
+        {"name": "A-B", "from": "A", "to": "B", "style": "solid"},
+        {"name": "A-C", "from": "A", "to": "C", "style": "solid"},
+        {"name": "B-C", "from": "B", "to": "C", "style": "solid"},
+        {"name": "B-D", "from": "B", "to": "D", "style": "dashed"},
+        {"name": "D-C", "from": "D", "to": "C", "style": "dashed"},
+    ]
+    observation_draw = ImageDraw.Draw(observation_source)
+    for segment in observation_segments:
+        observation_draw.line(
+            (*observation_points[segment["from"]], *observation_points[segment["to"]]),
+            fill="#20252d",
+            width=3,
+        )
+    observation_fixture = {
+        "source_size": [220, 170],
+        "points": observation_points,
+        "segments": observation_segments,
+        "curves": [],
+        "labels": [],
+        "dimensions": [],
+        "source_geometry_roi": [20, 15, 200, 155],
+        "source_geometry_roi_method": "manual source ink census",
+    }
+    observation_overlay, observation_side, observation_overlay_report = (
+        render_observation_overlay(observation_source, observation_fixture)
+    )
+    observation_overlay_path = args.out / "source-observation-overlay.png"
+    observation_side_path = args.out / "source-vs-observation.png"
+    observation_overlay.save(observation_overlay_path)
+    observation_side.save(observation_side_path)
+
+    baseline_scope_pdf = args.out / "scope-baseline.pdf"
+    revised_scope_pdf = args.out / "scope-revised.pdf"
+    with pymupdf.open() as document:
+        page = document.new_page()
+        page.insert_text((72, 72), "before", fontsize=12)
+        second = document.new_page()
+        second.insert_text((72, 72), "unchanged", fontsize=12)
+        document.save(baseline_scope_pdf)
+    with pymupdf.open() as document:
+        page = document.new_page()
+        page.insert_text((72, 72), "after", fontsize=12)
+        second = document.new_page()
+        second.insert_text((72, 72), "unchanged", fontsize=12)
+        document.save(revised_scope_pdf)
+    scope_report = compare_pdf_scope(
+        baseline_scope_pdf,
+        revised_scope_pdf,
+        args.out / "scope-comparison",
+        allowed_pages={1},
+        dpi=96,
+        require_each_target_change=True,
+    )
 
     missing_segment = json.loads(json.dumps(prism))
     missing_segment["required_segments"] = ["inside", "must-not-exist"]
@@ -401,6 +671,34 @@ def main() -> int:
     omitted_line_report = residual_line_report(omission_source, omission_redraw_missing)
     complete_line_report = residual_line_report(omission_source, omission_redraw_complete)
 
+    omitted_component_source = Image.new("L", (320, 180), 255)
+    omitted_component_redraw = Image.new("L", (320, 180), 255)
+    ImageDraw.Draw(omitted_component_source).rectangle((24, 34, 132, 146), outline=20, width=4)
+    ImageDraw.Draw(omitted_component_source).rectangle((188, 30, 298, 150), outline=20, width=4)
+    ImageDraw.Draw(omitted_component_redraw).rectangle((24, 34, 132, 146), outline=20, width=4)
+    self_hull_manifest = {
+        "type": "trace",
+        "trace_evidence": {
+            "source_size": [320, 180],
+            "points": {
+                "L0": [24, 34], "L1": [132, 34],
+                "L2": [132, 146], "L3": [24, 146],
+            },
+        },
+    }
+    self_hull_residual = residual_line_report(
+        omitted_component_source,
+        omitted_component_redraw,
+        manifest=self_hull_manifest,
+    )
+    source_roi_manifest = json.loads(json.dumps(self_hull_manifest))
+    source_roi_manifest["trace_evidence"]["source_geometry_roi"] = [10, 12, 310, 166]
+    source_roi_residual = residual_line_report(
+        omitted_component_source,
+        omitted_component_redraw,
+        manifest=source_roi_manifest,
+    )
+
     chord_source = Image.new("L", (240, 180), 245)
     chord_draw = ImageDraw.Draw(chord_source)
     chord_draw.line((35, 150, 120, 90), fill=20, width=4)
@@ -445,6 +743,120 @@ def main() -> int:
     faint_line_source = Image.new("L", (240, 180), 245)
     ImageDraw.Draw(faint_line_source).line((30, 90, 210, 90), fill=190, width=2)
     faint_line_report = segment_source_support(faint_line_source, flat_shading_manifest)
+
+    # A source-faithful refinement fixture: the initial shared landmarks are a
+    # few native pixels off the printed triangle.  Refinement may move named
+    # junctions but must not invent, delete, or independently bend segments.
+    refinement_source = Image.new("RGB", (220, 170), "white")
+    refinement_true_points = {
+        "A": [108.0, 24.0],
+        "B": [34.0, 141.0],
+        "C": [190.0, 143.0],
+        "D": [109.0, 99.0],
+    }
+    refinement_segments = [
+        {"name": "A-B", "from": "A", "to": "B", "style": "solid"},
+        {"name": "A-C", "from": "A", "to": "C", "style": "solid"},
+        {"name": "B-C", "from": "B", "to": "C", "style": "solid"},
+        {"name": "B-D", "from": "B", "to": "D", "style": "dashed"},
+        {"name": "D-C", "from": "D", "to": "C", "style": "dashed"},
+    ]
+    refinement_draw = ImageDraw.Draw(refinement_source)
+    for segment in refinement_segments:
+        p0 = refinement_true_points[segment["from"]]
+        p1 = refinement_true_points[segment["to"]]
+        refinement_draw.line((*p0, *p1), fill="#20252d", width=3)
+    refinement_initial = {
+        name: [point[0] + 4.0, point[1] - 3.0]
+        for name, point in refinement_true_points.items()
+    }
+    refinement_distance, _ = source_distance(refinement_source)
+    refinement_before = all_metrics(
+        refinement_distance, refinement_initial, refinement_segments
+    )
+    refinement_after_points, refinement_history = refine_points(
+        refinement_distance,
+        refinement_initial,
+        refinement_segments,
+        radius=7,
+        passes=4,
+        locked=set(),
+        displacement_weight=0.01,
+    )
+    refinement_after = all_metrics(
+        refinement_distance, refinement_after_points, refinement_segments
+    )
+    refinement_overlay = args.out / "source-faithful-refinement-overlay.png"
+    draw_overlay(
+        refinement_source,
+        refinement_initial,
+        refinement_after_points,
+        refinement_segments,
+        [],
+        refinement_overlay,
+    )
+    refinement_before_score = float(np.mean([
+        record["score"] for record in refinement_before.values()
+    ]))
+    refinement_after_score = float(np.mean([
+        record["score"] for record in refinement_after.values()
+    ]))
+    visual_sheet = args.out / "vision-review-sheet.png"
+    landmark_sheet = args.out / "vision-landmark-sheet.png"
+    visual_panels = make_main_sheet(
+        refinement_source,
+        refinement_source,
+        Image.open(refinement_overlay).convert("RGB"),
+        None,
+        None,
+        visual_sheet,
+        (420, 320),
+    )
+    visual_landmarks = make_landmark_sheet(
+        refinement_source,
+        refinement_after_points,
+        landmark_sheet,
+        radius=28,
+        tile_size=180,
+    )
+    visual_fixture_files = {
+        "source": args.out / "vision-source.png",
+        "observation": args.out / "vision-observation.json",
+        "observation_overlay": refinement_overlay,
+        "redraw": refinement_overlay,
+        "comparison": refinement_overlay,
+        "diagnostic": refinement_overlay,
+        "comparison_report": args.out / "vision-comparison.json",
+        "visual_review_sheet": visual_sheet,
+        "landmark_zoom_sheet": landmark_sheet,
+    }
+    refinement_source.save(visual_fixture_files["source"])
+    visual_fixture_files["observation"].write_text(
+        json.dumps({"points": refinement_after_points}), encoding="utf-8"
+    )
+    visual_fixture_files["comparison_report"].write_text(
+        json.dumps({"ok": True}), encoding="utf-8"
+    )
+    visual_review_fixture = {
+        "status": "approved",
+        "reviewer": "selftest-vision-reviewer",
+        "review_method": "Opened both PNGs in the image viewer at original detail.",
+        "artifacts": {
+            name: {
+                "file": str(visual_fixture_files[name]),
+                "sha256": hashlib.sha256(
+                    visual_fixture_files[name].read_bytes()
+                ).hexdigest(),
+            }
+            for name in GEOMETRY_ARTIFACTS
+        },
+        "checks": {name: True for name in GEOMETRY_CHECKS},
+        "issues": [],
+    }
+    visual_review_gate = validate_visual_review(visual_review_fixture, args.out)
+    pending_visual_review = json.loads(json.dumps(visual_review_fixture))
+    pending_visual_review["status"] = "pending-vision-review"
+    pending_visual_review_gate = validate_visual_review(pending_visual_review, args.out)
 
     prepared_source = SourceEvidence.prepare(ink_source)
     prepared_redraw = RedrawEvidence.prepare(ink_redraw_good, ink_source.size)
@@ -736,9 +1148,33 @@ def main() -> int:
         "self_declared_probe_result_rejected": not tampered_graph_report["ok"],
         "clipped_svg_rejected": not clipped_svg_report["ok"],
         "unmatched_final_figure_rejected": not bad_delivery_report["ok"],
+        "stale_final_pdf_hash_rejected": not stale_delivery_report["ok"],
+        "missing_delivery_visual_review_rejected": not missing_visual_review_report["ok"],
+        "stale_final_problem_crop_rejected": not stale_final_crop_report["ok"],
+        "unrelated_final_problem_crop_rejected": not unrelated_final_crop_report["ok"],
+        "tiny_final_problem_crop_rejected": not tiny_final_crop_report["ok"],
+        "missing_final_problem_box_rejected": not missing_final_problem_box_report["ok"],
+        "omitted_inventory_item_rejected": (
+            not omitted_inventory_report["ok"]
+            and any(error["code"] == "SOURCE_PAGES_UNACCOUNTED" for error in omitted_inventory_report["errors"])
+        ),
+        "crop_edge_continuation_rejected": (
+            clipped_crop_report["detected"] and not contained_crop_report["detected"]
+        ),
         "displaced_redraw_ink_rejected": not ink_alignment_bad["ok"],
         "omitted_source_line_rejected": (
             omission_one_way["ok"] and not omitted_line_report["ok"]
+        ),
+        "omitted_component_rejected_by_source_first_roi": (
+            not source_roi_residual["ok"]
+            and source_roi_residual["uses_source_first_roi"]
+            and bool(source_roi_residual["candidates"])
+        ),
+        "missing_source_first_roi_rejected_without_hull_fallback": (
+            not self_hull_residual["ok"]
+            and self_hull_residual["scope"]
+            == "missing required source-first geometry ROI"
+            and self_hull_residual["full_source_candidate_count"] > 0
         ),
         "unsupported_chord_rejected": not segment_support_bad["ok"],
         "flat_shading_rejected_as_geometry": not flat_shading_report["ok"],
@@ -761,6 +1197,7 @@ def main() -> int:
             bool(incomplete_composite_report)
             and not incomplete_composite_report["ok"]
         ),
+        "pending_visual_review_rejected": not pending_visual_review_gate["ok"],
     }
 
     positive_gates = {
@@ -820,6 +1257,35 @@ def main() -> int:
         "readable_raster_line_weight": readable_line_thickness >= 4,
         "latin_label_raster_visible": latin_label_ink >= 40,
         "hangul_label_raster_visible": hangul_label_ink >= 25,
+        "complete_workbook_inventory_accepted": inventory_report["ok"],
+        "source_observation_overlay_is_visually_auditable": (
+            observation_overlay_report["ok"]
+            and observation_overlay_report["counts"]["points"] == 4
+            and observation_overlay_report["counts"]["segments"] == 5
+            and observation_overlay_path.is_file()
+            and observation_side_path.is_file()
+        ),
+        "revision_scope_preserves_unlisted_pages": (
+            scope_report["ok"]
+            and [page["page"] for page in scope_report["pages"] if page.get("changed_pixels", 0) > 0] == [1]
+            and scope_report["outside_scope_changed_pixels"] == 0
+        ),
+        "source_faithful_shared_landmark_refinement": (
+            refinement_after_score < refinement_before_score * 0.72
+            and set(refinement_after_points) == set(refinement_initial)
+            and len(refinement_segments) == 5
+            and bool(refinement_history)
+            and refinement_overlay.is_file()
+        ),
+        "vision_review_artifacts_are_high_resolution": (
+            len(visual_panels) >= 5
+            and visual_landmarks == len(refinement_after_points)
+            and visual_sheet.is_file()
+            and landmark_sheet.is_file()
+            and Image.open(visual_sheet).width >= 840
+            and Image.open(landmark_sheet).width >= 720
+        ),
+        "hash_bound_visual_review_accepted": visual_review_gate["ok"],
     }
 
     all_ok = (

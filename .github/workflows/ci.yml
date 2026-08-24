@@ -61,6 +61,15 @@ jobs:
       - name: Run regression self-test
         run: python scripts/selftest.py --out "${{ runner.temp }}/math-workbook-rebuilder-selftest"
 
+      - name: Run focused contract tests
+        run: >-
+          python -m unittest
+          scripts.test_geometry_contracts
+          scripts.test_markers
+          scripts.test_visual_review
+          scripts.test_validate_workbook_cache
+          -v
+
       - name: Test Codex and Claude Windows installers
         if: runner.os == 'Windows'
         shell: pwsh

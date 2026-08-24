@@ -1,6 +1,6 @@
 # Math Workbook Rebuilder
 
-An Agent Skill for Codex and Claude Code that rebuilds Korean math worksheets from photographed workbook pages. It preserves problem text and geometry, removes handwriting, redraws diagrams as verified SVG, and requires source-to-output comparison before PDF delivery.
+An Agent Skill for Codex and Claude Code that rebuilds Korean math worksheets from photographed workbook pages. It preserves problem text and geometry, removes handwriting, traces native source coordinates, and makes the agent visually inspect named source overlays, registered redraw diagnostics, landmark zooms, and final PDF crops.
 
 ## Why this exists
 
@@ -11,15 +11,20 @@ This skill began as a project made with care and affection: I needed a dependabl
 ## What it includes
 
 - Exact worksheet transcription and handwriting-removal rules
+- Whole-workbook source inventory and resumable content-addressed production stages
+- Vision-first source/observation overlays and native landmark zoom sheets
 - SVG geometry reconstruction helpers
+- Shared-junction native-ink coordinate refinement that preserves topology
+- One-to-one curve, label, dimension, right-angle, and tick-marker inventories
 - Print-readable SVG defaults with configurable stroke and label sizing
 - Quantitative landmark checks for traced diagrams
 - Provenance checks that reject self-referential expected values
 - Stable ring-degree and midpoint-cut evidence for multigraphs
 - Source/redraw/overlay comparison reports with artifact hashes
+- Registered red/blue/green difference diagnostics and full-source missing-line leads
 - Adaptive inspection sizing, crop-local native coordinate grids, and capped overview sheets
 - Segment-oriented faint-line validation, shared distance fields, and content-addressed SVG raster caching
-- PDF delivery gates and regression tests
+- Current-PDF hash-bound final visual review, four-margin QA, revision-scope pixel comparison, and regression tests
 
 ## Privacy
 

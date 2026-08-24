@@ -27,13 +27,21 @@ def package_files() -> list[Path]:
             capture_output=True,
         )
         names = completed.stdout.decode("utf-8", errors="replace").split("\0")
-        return [SKILL_ROOT / name for name in names if name]
+        git_files = [SKILL_ROOT / name for name in names if name]
+        # An installed skill can live inside an unrelated parent Git worktree
+        # (for example a temporary verification directory).  In that case
+        # `git ls-files` succeeds but returns no files for this ignored subtree.
+        # Fall back to the actual installed tree instead of reporting that zero
+        # files were checked.
+        if git_files:
+            return git_files
     except (FileNotFoundError, subprocess.CalledProcessError):
-        return [
-            path
-            for path in SKILL_ROOT.rglob("*")
-            if path.is_file() and not EXCLUDED_PARTS.intersection(path.relative_to(SKILL_ROOT).parts)
-        ]
+        pass
+    return [
+        path
+        for path in SKILL_ROOT.rglob("*")
+        if path.is_file() and not EXCLUDED_PARTS.intersection(path.relative_to(SKILL_ROOT).parts)
+    ]
 
 
 def validate_frontmatter(errors: list[str]) -> None:

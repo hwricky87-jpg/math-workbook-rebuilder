@@ -110,7 +110,7 @@
 ### 영구 개선
 
 - 비교기는 재작도본을 원본 크기 좌표계로 정규화하고, 재작도 잉크 중 원본 잉크 허용 거리 안에 있는 비율을 보고·게이트한다.
-- 수동 검사는 각 항목마다 별도 review JSON에 7개 판정을 기록하고 원본·SVG·비교 이미지·보고서 해시를 고정한다.
+- 수동 검사는 각 항목마다 별도 review JSON에 validator가 요구하는 모든 판정을 기록하고 원본·관측·SVG·comparison·diagnostic·보고서·landmark 확대판 해시를 고정한다.
 - manifest의 불리언은 review JSON과 항목별로 같아야 하며 review가 없거나 오래되면 거부한다.
 
 ## trace-missing-edge-001 — 누락 잔차를 먼 꼭짓점까지 잘못 연장함
@@ -193,3 +193,106 @@
 - SVG·렌더러·잠금 파일·배율의 내용 해시로 래스터 캐시를 만들고, 보고서에 캐시 적중과 단계별 시간을 남긴다.
 - `preprocess_geometry.py`가 crop-local native 좌표 격자를 자동 생성한다. 개별 판독본은 전체 해상도를 유지하고 overview sheet 패널만 긴 변 `1000px`로 제한한다.
 - 21번 전체 비교에서 동일 조건 5회 중앙값이 `926.6ms`에서 `484.4ms`로 줄었고, 상단 4단계와 보기 5개 전체가 계속 통과했다.
+
+## inventory-omission-001 — 연습문제만 만들고 개념탐구·예제를 빠뜨림
+
+### 증상과 원인
+
+남은 문제와 PDF 페이지는 내부적으로 정상이라 기존 페이지별 검사가 통과했지만 원본에 있던 개념탐구와 예제가 납품 집합에서 사라졌다. PDF를 만들기 전에 원본 전체 항목 집합을 고정하지 않았기 때문이다.
+
+### 영구 개선
+
+- `source-inventory.json`에 모든 쪽과 모든 항목의 ID·순서·종류·bbox·text/figure 유무를 고정한다.
+- `validate_inventory.py`가 inventory/content/figure manifests/delivery의 exact ID set과 모든 원본 쪽 account를 검사한다.
+- selftest는 2쪽 원본에서 example 하나를 제거하면 `SOURCE_PAGES_UNACCOUNTED`로 거부되는 사례를 둔다.
+
+## crop-lineage-001 — 잘린 crop을 완전한 원본처럼 추적함
+
+### 증상과 원인
+
+모서리가 crop 경계에서 끊겼지만 이후 모든 좌표·SVG·비교가 그 잘린 crop에 대해 자기일치했다. crop이 어느 부모 이미지의 어느 픽셀 영역에서 왔는지와 경계를 통과하는 획을 기록하지 않았다.
+
+### 영구 개선
+
+- 전처리는 부모 해시·크기, crop box, crop 해시·pixel hash, crop context와 edge-stroke continuation을 기록한다.
+- 새 lineage가 있으면 validator가 부모에서 다시 crop해 픽셀 일치를 확인한다.
+- 경계로 이어지는 실제 획은 더 넓게 다시 자르는 것이 기본이며, 의도적인 페이지 경계만 별도 검토 사유로 허용한다.
+
+## trace-source-roi-001 — 선언한 점들의 hull 밖 구성요소가 통째로 사라짐
+
+### 증상과 원인
+
+원본에는 분리된 두 번째 도형이 있었지만 observation·manifest·SVG에서 모두 빠졌다. 누락선 검사가 이미 선언한 trace point hull 안에서만 실행되어 빠진 구성요소를 보지 못했다.
+
+### 영구 개선
+
+- 원본을 먼저 본 관측자가 모든 구성요소를 포함하는 `source_geometry_roi`를 정한다.
+- ROI를 trace point hull이나 SVG bbox에서 만들면 거부한다.
+- 실제 원본 trace의 비교 ROI는 `trace_evidence.source_geometry_roi` 하나만 사용하고, 관측 JSON의 같은 필드와 정확히 같아야 한다. manifest 루트나 `source.figure_roi` 같은 별칭으로 더 작은 ROI를 넣어 비교기를 우회하면 거부한다.
+- 비교기는 gate ROI와 별개로 full native crop residual 후보도 diagnostic에 `R#`로 표시한다.
+- selftest는 hull 밖 두 번째 사각형을 빠뜨린 redraw가 full-crop 후보에 나타나고 source-first ROI에서는 실패하는 사례를 둔다.
+
+## trace-topology-signature-001 — observation과 manifest가 같은 잘못을 공유함
+
+### 증상과 원인
+
+관측 파일과 manifest의 좌표를 그대로 복사해 landmark 오차는 0이었지만 짧은 내부선 두 개가 빠지거나 원본의 흰 틈을 가짜 선으로 연결했다. `required_segments`도 같은 부분집합이라 이름 존재 검사만 통과했다.
+
+### 영구 개선
+
+- 관측 overlay에서 원본의 각 면을 훑어 점·선·곡선·라벨·치수를 이름과 함께 실제로 본다.
+- `required_segments == observation segments == manifest segments`와 곡선 complete set을 강제한다.
+- `V/E/components/isolated/degree multiset/cycle rank/per-style counts` 위상 서명을 원본 관측과 manifest에서 각각 계산해 비교한다.
+
+## vision-loop-001 — 비교 PNG는 만들었지만 실제로 열어 보지 않음
+
+### 증상과 원인
+
+전체 ink score는 좋았지만 원본과 다른 연결 관계와 비례가 남았다. 수치 보고서와 축소 contact sheet만 읽고 최신 native overlay의 접합점을 보지 않았다.
+
+### 영구 개선
+
+- `build_observation_overlay.py`가 원본/관측과 ROI 확대판을 만든다.
+- `compare_geometry.py --diagnostic-out`이 등록된 색상 차이와 `R#` 누락선 후보를 만든다.
+- `build_visual_review.py`가 전체 검수판과 꼭짓점 native 확대판, 해시된 pending review를 만든다.
+- Geometry validator는 review의 observation overlay를 현재 source+observation으로 다시 렌더한 RGB 픽셀과 대조한다. 무관한 PNG와 그 자체 SHA·복제 report를 함께 제출해도 거부한다.
+- vision-capable agent가 두 PNG를 실제로 열어 본 뒤에만 review 값을 기록한다.
+- 합성 forward test에서 native 좌표 평균오차가 `5.978px → 1.546px`, 2px 선 지지율이 `0.600 → 0.962`로 개선되고, 일부러 빠뜨린 76px 내부선이 `R1`으로 검출된 사례를 고정한다.
+
+## delivery-stale-pdf-001 — 마지막 도형 수정 뒤 예전 PDF 검수 해시를 재사용함
+
+### 증상과 원인
+
+도형 비교는 최신이었지만 delivery가 이전 PDF와 페이지 render를 가리켰다. 파일 존재와 수동 `true`만 확인해 서로 다른 build의 증거가 섞였다.
+
+### 영구 개선
+
+- delivery schema v2가 현재 PDF SHA, QA 보고서의 같은 PDF SHA, 페이지 render SHA·pixel SHA, 문항별 source/comparison/final render SHA를 재계산한다.
+- 각 문항의 최종 visual review, QA page render의 half-open RGB pixel bbox, 그 bbox에서 무배율로 자른 실질적인 final problem crop을 필수로 묶고 `validate_visual_review(..., require_final_crop=True)`를 다시 실행한다. 페이지 어디엔가 존재하는 1×1 픽셀은 인정하지 않는다.
+- `validate_workbook.py`는 입력 해시로 build ID를 만들고 변경된 단계 이후의 stale evidence를 재실행한다.
+- 수정 작업은 `compare_pdf_scope.py`가 동일 렌더 환경에서 허용된 쪽/ROI 밖의 변경 픽셀을 거부한다.
+
+## resume-import-cache-001 — 실행 스크립트가 import한 helper 변경을 캐시가 놓침
+
+### 증상과 원인
+
+stage command의 `worker.py` 해시는 같았지만 import된 `helper.py`의 값이 바뀌었다. 직접 명령행에 나온 파일만 execution identity에 포함되어 `--resume`이 예전 출력을 재사용했다.
+
+### 영구 개선
+
+- workbook job 시작 시 스킬 `scripts/`의 실행 코드 파일을 한 번만 내용 주소화하고 집계 digest를 모든 stage identity에 넣는다.
+- 같은 job 안에서는 이 digest를 재사용해 반복 I/O를 피하되, 다음 job 실행에서는 다시 계산한다.
+- 회귀 시험은 helper의 출력 `A→B` 변경 뒤 같은 command가 cache miss로 재실행되어 `B`를 만드는지 확인한다.
+
+## resume-independent-items-001 — p1 수정이 독립 p2 캐시까지 무효화함
+
+### 증상과 원인
+
+모든 stage fingerprint에 전체 선행 stage chain을 넣어 p1 입력 하나가 바뀌면 p2가 아무 파일도 공유하지 않아도 다시 실행됐다. 정확성에는 문제가 없지만 “변경되지 않은 문항 재사용”과 대량 문제지 속도 목표를 잃었다.
+
+### 영구 개선
+
+- stage가 선언한 input/evidence 경로와 prior output의 교집합, 그리고 명시적 `depends_on`만 항목 의존성으로 넣는다.
+- PDF·delivery·revision 같은 workbook-wide gate는 모든 문항 선행단계에 의존한다.
+- 의존성을 전혀 선언하지 않은 stage는 안전하게 전체 선행 chain에 의존하는 기존 fail-closed 동작을 유지한다.
+- 회귀 시험은 p1 변경 뒤 p1만 cache miss, 독립 p2는 hit, PDF·delivery는 miss인지 확인한다.

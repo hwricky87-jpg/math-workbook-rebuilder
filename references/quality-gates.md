@@ -5,10 +5,12 @@
 하나라도 실패하면 최종 PDF를 전달하지 않는다.
 
 - 문제 문장, 숫자, 단위, 보기, 기호가 원본과 일치한다.
+- 원본 전체 inventory, 전사 입력, 도형 manifest, 최종 delivery의 항목 집합이 정확히 일치한다.
 - 문제에서 요구하는 점·선·면·내부선·경로가 모두 있다.
 - 도형 위상과 면 인접 관계가 맞다.
 - 좌표 추적 도형의 모든 명시적 점에 원본 픽셀 랜드마크가 있으며, 최대 정규화 오차가 manifest 허용값 이하이고 절대 상한 `0.04` 이하이다.
 - 좌표와 선분 목록이 현재 원본 해시를 가진 별도 관측 JSON에서 왔고 manifest와 일대일로 일치한다.
+- source-first geometry ROI가 모든 구성요소를 포함하고, 관측 선분·곡선·marker·라벨·치수의 complete set과 위상 서명이 manifest와 일치한다. Marker는 위상 서명의 구조 간선으로 세지 않는다.
 - 같은 두 끝점 사이의 중복 선분이나 실선·점선 충돌이 없다.
 - 실선·점선·강조선의 역할이 맞다.
 - 라벨과 치수가 대상 요소에 정확히 붙어 있다.
@@ -22,12 +24,13 @@
 - 다중간선의 실측 차수, 간선에서 계산한 차수, 차수 합 `2|E|`, 다중도와 실제 SVG 가닥 수가 모두 일치한다.
 - 문제 풀이 또는 독립적인 수학 검산이 재구성 그림과 모순되지 않는다. 깔끔한 계산 결과만으로 통과시키지 않는다.
 - 각 문제에 원본·재작도·겹침 비교 산출물과 JSON 비교 보고서가 있고 최신 렌더를 확인했다.
+- vision-capable agent가 원본, 관측 overlay, registered diagnostic, landmark 확대판, 최종 PDF crop을 이미지 뷰어로 실제 열어 확인했다. 파일 생성이나 수치 `ok`만으로 이 판정을 대신하지 않는다.
 - 비교 보고서의 원본 크롭·SVG·비교 이미지 해시가 현재 파일과 일치한다. 수동 불리언만 참인 비교는 인정하지 않는다.
 - 비교 보고서의 재작도 잉크가 허용 거리 안에서 원본 잉크와 충분히 겹치고, 관측 꼭짓점 영역 안에 재작도로 설명되지 않는 긴 원본 직선 잔차가 없으며, 모든 선언된 실선·강조선이 방향 정렬된 좁은 띠에서 원본의 지속적인 중심-측면 대비를 보이고, 항목별 수동 판정은 별도의 해시된 review JSON과 일치한다. 평평한 음영이나 다른 선분의 국소 임계값이 해당 선분의 지지로 계산되면 실패다.
 - `source_comparison`의 모든 필수 판정이 참이며 비교 산출물 경로가 기록되어 있다.
 - 모든 PDF 페이지를 렌더해 실제 눈으로 확인했다.
 - 최종 PDF의 각 문제를 원본 문제 크롭과 다시 대조했다.
-- 최종 대조 기록 `delivery.json`이 `scripts/validate_delivery.py`를 통과했다.
+- 최종 대조 기록은 schema v2이며 현재 PDF·QA page render·문항별 source/comparison/명시적 pixel bbox의 final problem crop/완료된 visual review 해시를 묶고 `scripts/validate_delivery.py`를 통과했다.
 
 ## 원본 비교 게이트
 
@@ -67,6 +70,10 @@
 - 원본 거리장이 비교 실행당 한 번만 계산되고, 내용 해시가 같은 SVG 래스터만 캐시에 적중하며, 캐시 사용 여부와 단계별 시간이 보고되는지
 - 방향 정렬 국소 띠가 흐린 실제 선은 승인하면서 평평한 음영을 가짜 선으로 승인하지 않는지
 - 좌표 격자가 crop-local native pixel 눈금을 표시하고, 개별 판독본은 고해상도를 유지하면서 전체 inspection sheet만 크기 상한을 지키는지
+- 실제 trace의 source-first ROI가 `trace_evidence`와 관측 JSON의 단일 동일 값인지, 더 작은 root/source 별칭 ROI로 잔차 검사를 우회할 수 없는지
+- comparison report의 diagnostic 경로·해시와 visual review가 실제 최신 diagnostic을 정확히 가리키는지
+- 최종 delivery가 `require_final_crop=True` visual review와 현재 QA page render의 명시적 half-open pixel bbox에서 무배율로 자른 실질적인 문제 crop을 재검산하고 1×1/임의 위치 crop을 거부하는지
+- resume cache가 command 파일뿐 아니라 import된 스킬 helper 변경에도 무효화되는지
 
 자동 검사는 시각 검사를 대신하지 않는다. 자동 검사 통과 후 최신 PNG 또는 PDF 렌더를 확인해야 한다.
 

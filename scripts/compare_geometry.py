@@ -123,6 +123,27 @@ def fit_panel(image: Image.Image, size: tuple[int, int]) -> Image.Image:
     return result
 
 
+def registered_redraw(source: Image.Image, redraw: Image.Image) -> Image.Image:
+    """Map redraw pixels into the same normalized x/y frame as the source."""
+    return redraw.convert("RGB").resize(source.size, Image.Resampling.LANCZOS)
+
+
+def color_difference(source: Image.Image, redraw: Image.Image) -> Image.Image:
+    """Show missing source ink in red, extra redraw ink in blue, matches in green."""
+    source_evidence = SourceEvidence.prepare(source)
+    redraw_evidence = RedrawEvidence.prepare(redraw, source.size)
+    source_mask = source_evidence.mask
+    redraw_mask = redraw_evidence.mask
+    result = np.full((source.height, source.width, 3), 255, dtype=np.uint8)
+    overlap = np.logical_and(source_mask, redraw_mask)
+    source_only = np.logical_and(source_mask, np.logical_not(redraw_mask))
+    redraw_only = np.logical_and(redraw_mask, np.logical_not(source_mask))
+    result[overlap] = (42, 125, 72)
+    result[source_only] = (220, 38, 38)
+    result[redraw_only] = (30, 105, 210)
+    return Image.fromarray(result, mode="RGB")
+
+
 def _otsu_threshold(image: Image.Image) -> int:
     """Return a deterministic dark-ink threshold for a photographed crop."""
     histogram = np.bincount(np.asarray(image.convert("L"), dtype=np.uint8).ravel(), minlength=256)
@@ -465,6 +486,116 @@ def segment_source_support(
     }
 
 
+def _hough_candidates(
+    residual: np.ndarray,
+    diagonal: float,
+    tolerance_radius: int,
+    minimum_line_ratio: float,
+) -> tuple[list[dict[str, object]], int, int, int]:
+    """Return deduplicated native residual-line candidates and detector settings."""
+    minimum_length = max(35, int(round(diagonal * minimum_line_ratio)))
+    maximum_gap = max(6, int(round(diagonal * 0.014)))
+    vote_threshold = max(14, int(round(minimum_length * 0.15)))
+    raw_lines = cv2.HoughLinesP(
+        residual,
+        1,
+        math.pi / 360,
+        threshold=vote_threshold,
+        minLineLength=minimum_length,
+        maxLineGap=maximum_gap,
+    )
+    candidates: list[dict[str, object]] = []
+    if raw_lines is not None:
+        for [[x1, y1, x2, y2]] in raw_lines:
+            # Canonicalize direction so the same source stroke is not reported
+            # twice merely because Hough returned reversed endpoints.
+            if (x2, y2) < (x1, y1):
+                x1, y1, x2, y2 = x2, y2, x1, y1
+            length = math.hypot(x2 - x1, y2 - y1)
+            angle = math.degrees(math.atan2(y2 - y1, x2 - x1)) % 180
+            candidate = {
+                "from": [int(x1), int(y1)],
+                "to": [int(x2), int(y2)],
+                "length_px": length,
+                "length_ratio": length / diagonal,
+                "angle_degrees": angle,
+            }
+            if any(
+                abs(float(candidate["angle_degrees"]) - float(prior["angle_degrees"])) <= 2.0
+                and math.dist(candidate["from"], prior["from"]) <= tolerance_radius * 2
+                and math.dist(candidate["to"], prior["to"]) <= tolerance_radius * 2
+                for prior in candidates
+            ):
+                continue
+            candidates.append(candidate)
+    candidates.sort(key=lambda item: float(item["length_px"]), reverse=True)
+    return candidates, minimum_length, maximum_gap, vote_threshold
+
+
+def _source_first_roi_mask(
+    source_size: tuple[int, int],
+    manifest: dict[str, object] | None,
+) -> tuple[np.ndarray | None, str | None]:
+    """Read the one authoritative source-first ROI for a real trace.
+
+    ``trace_evidence.source_geometry_roi`` is hash-bound to the separate source
+    observation by ``validate_geometry.py``.  Historical aliases at the
+    manifest root, under ``source``, or named ``geometry_roi`` are deliberately
+    ignored: accepting any of them would let a smaller, redraw-derived region
+    hide a disconnected source component from the reverse residual census.
+    """
+    if not isinstance(manifest, dict):
+        return None, None
+    trace = manifest.get("trace_evidence", {})
+    if not isinstance(trace, dict):
+        return None, None
+    value = trace.get("source_geometry_roi")
+    label = "trace_evidence.source_geometry_roi"
+    width, height = source_size
+    if isinstance(value, dict):
+        value = value.get("box") or value.get("polygon") or value.get("points")
+    if isinstance(value, list) and len(value) == 4 and all(
+        isinstance(item, (int, float)) and not isinstance(item, bool)
+        for item in value
+    ):
+        x0, y0, x1, y1 = [int(round(float(item))) for item in value]
+        x0, x1 = sorted((max(0, x0), min(width, x1)))
+        y0, y1 = sorted((max(0, y0), min(height, y1)))
+        if x1 > x0 and y1 > y0:
+            mask = np.zeros((height, width), dtype=np.uint8)
+            mask[y0:y1, x0:x1] = 255
+            return mask, label
+    if (
+        isinstance(value, list)
+        and len(value) >= 3
+        and all(
+            isinstance(point, list)
+            and len(point) == 2
+            and all(
+                isinstance(item, (int, float)) and not isinstance(item, bool)
+                for item in point
+            )
+            for point in value
+        )
+    ):
+        polygon = np.asarray(
+            [
+                [
+                    int(round(float(point[0]))),
+                    int(round(float(point[1]))),
+                ]
+                for point in value
+            ],
+            dtype=np.int32,
+        )
+        polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
+        polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillPoly(mask, [polygon], 255)
+        return mask, label
+    return None, None
+
+
 def residual_line_report(
     source: Image.Image,
     redraw: Image.Image,
@@ -495,83 +626,54 @@ def residual_line_report(
         redraw_mask.astype(np.uint8),
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)),
     ).astype(bool)
-    residual = np.logical_and(source_mask, np.logical_not(redraw_nearby)).astype(np.uint8) * 255
-    residual = cv2.morphologyEx(
-        residual,
+    residual_full = np.logical_and(source_mask, np.logical_not(redraw_nearby)).astype(np.uint8) * 255
+    residual_full = cv2.morphologyEx(
+        residual_full,
         cv2.MORPH_CLOSE,
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
     )
 
-    # Dimension arcs and text outside the observed geometry are legitimate
-    # source-only ink. When trace landmarks exist, limit the omission census
-    # to their convex hull (plus a small margin) so an unlisted internal edge
-    # cannot hide among annotation strokes.
-    scope = "full source crop"
-    evidence = manifest.get("trace_evidence", {}) if isinstance(manifest, dict) else {}
-    evidence_points = evidence.get("points", {}) if isinstance(evidence, dict) else {}
-    evidence_size = evidence.get("source_size") if isinstance(evidence, dict) else None
-    if (
-        isinstance(evidence_points, dict)
-        and len(evidence_points) >= 3
-        and evidence_size == list(source.size)
-    ):
-        hull_points: list[list[int]] = []
-        for value in evidence_points.values():
-            if (
-                isinstance(value, list)
-                and len(value) == 2
-                and all(isinstance(coordinate, (int, float)) for coordinate in value)
-            ):
-                hull_points.append([int(round(value[0])), int(round(value[1]))])
-        if len(hull_points) >= 3:
-            hull = cv2.convexHull(np.asarray(hull_points, dtype=np.int32))
-            scope_mask = np.zeros_like(residual)
-            cv2.fillConvexPoly(scope_mask, hull, 255)
-            scope_margin = max(3, tolerance_radius // 2)
-            scope_mask = cv2.dilate(
-                scope_mask,
-                cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE,
-                    (2 * scope_margin + 1, 2 * scope_margin + 1),
-                ),
-            )
-            residual = cv2.bitwise_and(residual, scope_mask)
-            scope = "trace-landmark convex hull"
-
-    minimum_length = max(35, int(round(diagonal * minimum_line_ratio)))
-    maximum_gap = max(6, int(round(diagonal * 0.014)))
-    vote_threshold = max(14, int(round(minimum_length * 0.15)))
-    raw_lines = cv2.HoughLinesP(
-        residual,
-        1,
-        math.pi / 360,
-        threshold=vote_threshold,
-        minLineLength=minimum_length,
-        maxLineGap=maximum_gap,
+    # Always census the full native crop for visual feedback.  The prior
+    # implementation looked only inside the convex hull of already-declared
+    # landmarks; an omitted component could therefore disappear from both the
+    # reconstruction and its verifier.  A source-first ROI, when present, is
+    # the gate scope.  A declared-point hull is never an acceptable substitute:
+    # it is self-referential and can hide an omitted disconnected component.
+    full_candidates, minimum_length, maximum_gap, vote_threshold = _hough_candidates(
+        residual_full,
+        diagonal,
+        tolerance_radius,
+        minimum_line_ratio,
     )
+    residual = residual_full.copy()
 
-    candidates: list[dict[str, object]] = []
-    if raw_lines is not None:
-        for [[x1, y1, x2, y2]] in raw_lines:
-            length = math.hypot(x2 - x1, y2 - y1)
-            angle = math.degrees(math.atan2(y2 - y1, x2 - x1)) % 180
-            candidate = {
-                "from": [int(x1), int(y1)],
-                "to": [int(x2), int(y2)],
-                "length_px": length,
-                "length_ratio": length / diagonal,
-                "angle_degrees": angle,
-            }
-            if any(
-                abs(float(candidate["angle_degrees"]) - float(prior["angle_degrees"])) <= 2.0
-                and math.dist(candidate["from"], prior["from"]) <= tolerance_radius * 2
-                and math.dist(candidate["to"], prior["to"]) <= tolerance_radius * 2
-                for prior in candidates
-            ):
-                continue
-            candidates.append(candidate)
-    candidates.sort(key=lambda item: float(item["length_px"]), reverse=True)
+    scope = "full source crop"
+    scope_source = "native crop"
+    source_first_roi, roi_label = _source_first_roi_mask(source.size, manifest)
+    if source_first_roi is not None:
+        residual = cv2.bitwise_and(residual, source_first_roi)
+        scope = "source-first geometry ROI"
+        scope_source = str(roi_label)
+    candidates, _, _, _ = _hough_candidates(
+        residual,
+        diagonal,
+        tolerance_radius,
+        minimum_line_ratio,
+    )
     errors: list[str] = []
+    source_record = manifest.get("source", {}) if isinstance(manifest, dict) else {}
+    real_trace = bool(
+        isinstance(manifest, dict)
+        and manifest.get("type") == "trace"
+        and not (isinstance(source_record, dict) and source_record.get("fixture"))
+    )
+    if real_trace and source_first_roi is None:
+        errors.append(
+            "real-source trace requires an independently observed source_geometry_roi; "
+            "the trace-point hull is not a valid comparison scope"
+        )
+        scope = "missing required source-first geometry ROI"
+        scope_source = None
     if candidates:
         longest = candidates[0]
         errors.append(
@@ -583,6 +685,8 @@ def residual_line_report(
         "errors": errors,
         "method": "reverse source-to-redraw long-line residual census",
         "scope": scope,
+        "scope_source": scope_source,
+        "uses_source_first_roi": source_first_roi is not None,
         "source_threshold": prepared_source.threshold,
         "redraw_threshold": prepared_redraw.threshold,
         "tolerance_ratio": tolerance_ratio,
@@ -590,9 +694,121 @@ def residual_line_report(
         "minimum_line_ratio": minimum_line_ratio,
         "minimum_line_length_px": minimum_length,
         "maximum_gap_px": maximum_gap,
+        "vote_threshold": vote_threshold,
         "candidates": candidates[:20],
+        "full_source_candidates": full_candidates[:40],
+        "full_source_candidate_count": len(full_candidates),
+        "note": (
+            "full_source_candidates are visual-review leads across the entire native crop; "
+            "the gated candidates use the independently observed ROI when available"
+        ),
         "residual_ink_pixels": int((residual > 0).sum()),
+        "full_residual_ink_pixels": int((residual_full > 0).sum()),
     }
+
+
+def build_diagnostic_sheet(
+    source: Image.Image,
+    redraw_registered: Image.Image,
+    manifest: dict[str, object] | None,
+    residual: dict[str, object],
+    segment_support: dict[str, object],
+    maximum_long_edge: int = 1800,
+) -> Image.Image:
+    """Create a vision-first native comparison with named actionable errors."""
+    annotated = source.convert("RGB").copy()
+    draw = ImageDraw.Draw(annotated)
+    font = ImageFont.load_default()
+    trace = manifest.get("trace_evidence", {}) if isinstance(manifest, dict) else {}
+    points = trace.get("points", {}) if isinstance(trace, dict) else {}
+    support_by_name = {
+        str(record.get("name")): record
+        for record in segment_support.get("segments", [])
+        if isinstance(record, dict)
+    }
+    if isinstance(manifest, dict) and isinstance(points, dict):
+        for segment in manifest.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            start = points.get(segment.get("from"))
+            end = points.get(segment.get("to"))
+            if not (
+                isinstance(start, list)
+                and len(start) == 2
+                and isinstance(end, list)
+                and len(end) == 2
+            ):
+                continue
+            name = str(segment.get("name", f"{segment.get('from')}-{segment.get('to')}"))
+            style = str(segment.get("style", "solid"))
+            support = support_by_name.get(name)
+            if support is not None and not support.get("ok"):
+                color, width = "#f79009", 5
+            elif style == "dashed":
+                color, width = "#7a4bc2", 3
+            elif style == "guide":
+                color, width = "#667085", 2
+            else:
+                color, width = "#087e8b", 3
+            draw.line((*start, *end), fill=color, width=width)
+            midpoint = ((float(start[0]) + float(end[0])) / 2, (float(start[1]) + float(end[1])) / 2)
+            draw.text(midpoint, name, fill="#101828", font=font, stroke_width=2, stroke_fill="white")
+        for name, point in sorted(points.items()):
+            if not isinstance(point, list) or len(point) != 2:
+                continue
+            x, y = float(point[0]), float(point[1])
+            draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill="#12b76a", outline="white", width=1)
+            draw.text((x + 5, y - 10), str(name), fill="#101828", font=font, stroke_width=2, stroke_fill="white")
+
+    for index, candidate in enumerate(residual.get("full_source_candidates", []), start=1):
+        if not isinstance(candidate, dict):
+            continue
+        start, end = candidate.get("from"), candidate.get("to")
+        if not (
+            isinstance(start, list)
+            and len(start) == 2
+            and isinstance(end, list)
+            and len(end) == 2
+        ):
+            continue
+        draw.line((*start, *end), fill="#d92d20", width=4)
+        draw.text(
+            ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2),
+            f"R{index}",
+            fill="#b42318",
+            font=font,
+            stroke_width=2,
+            stroke_fill="white",
+        )
+
+    difference = color_difference(source, redraw_registered)
+    label_height = 34
+    native_sheet = Image.new("RGB", (source.width * 2, source.height + label_height), "white")
+    native_sheet.paste(annotated, (0, label_height))
+    native_sheet.paste(difference, (source.width, label_height))
+    header = ImageDraw.Draw(native_sheet)
+    header.text(
+        (10, 10),
+        "SOURCE + OBSERVED SEGMENTS (RED R# = UNEXPLAINED SOURCE CANDIDATE)",
+        fill="#15263a",
+        font=font,
+    )
+    header.text(
+        (source.width + 10, 10),
+        "COLOR DIFF  RED=SOURCE-ONLY (MAY BE TEXT)  BLUE=REDRAW-ONLY  R#=LINE LEAD",
+        fill="#15263a",
+        font=font,
+    )
+    if max(native_sheet.size) > maximum_long_edge:
+        native_sheet = ImageOps.contain(
+            native_sheet,
+            (
+                maximum_long_edge,
+                max(1, int(round(maximum_long_edge * native_sheet.height / native_sheet.width))),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+    return native_sheet
 
 
 def main() -> int:
@@ -604,6 +820,11 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--diagnostic-out",
+        type=Path,
+        help="vision-first native overlay with named segments, residual candidates, and color diff",
+    )
     parser.add_argument("--width", type=int, default=560)
     parser.add_argument("--height", type=int, default=420)
     parser.add_argument("--ink-tolerance", type=float, default=0.012)
@@ -662,7 +883,9 @@ def main() -> int:
     )
     gates_ready = time.perf_counter()
     size = (args.width, args.height)
-    source_panel, redraw_panel = fit_panel(source, size), fit_panel(redraw, size)
+    redraw_registered = registered_redraw(source, redraw)
+    source_panel = fit_panel(source, size)
+    redraw_panel = fit_panel(redraw_registered, size)
     overlay = Image.blend(source_panel, redraw_panel, 0.5)
 
     label_height = 102 if trace or not routing["ok"] else 70
@@ -724,6 +947,18 @@ def main() -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(args.out)
+    diagnostic_hash = None
+    if args.diagnostic_out:
+        diagnostic = build_diagnostic_sheet(
+            source,
+            redraw_registered,
+            manifest,
+            residual,
+            segment_support,
+        )
+        args.diagnostic_out.parent.mkdir(parents=True, exist_ok=True)
+        diagnostic.save(args.diagnostic_out)
+        diagnostic_hash = sha256(args.diagnostic_out)
     sheet_ready = time.perf_counter()
     result = {
         "ok": bool(
@@ -739,6 +974,10 @@ def main() -> int:
         "source_sha256": sha256(args.source),
         "redraw_sha256": sha256(args.redraw),
         "artifact_sha256": sha256(args.out),
+        "diagnostic_artifact": (
+            str(args.diagnostic_out.resolve()) if args.diagnostic_out else None
+        ),
+        "diagnostic_artifact_sha256": diagnostic_hash,
         "source_size": list(source.size),
         "redraw_size": list(redraw.size),
         "panel_size": list(size),
