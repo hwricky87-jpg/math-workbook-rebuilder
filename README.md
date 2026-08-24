@@ -57,7 +57,7 @@ Ask Codex to install `hwricky87-jpg/math-workbook-rebuilder` with its skill inst
 
 ```powershell
 python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py" `
-  --repo hwricky87-jpg/math-workbook-rebuilder --path . --ref v0.6.1 `
+  --repo hwricky87-jpg/math-workbook-rebuilder --path . --ref v0.6.2 `
   --dest "$env:USERPROFILE\.codex\skills" --name math-workbook-rebuilder --method download
 ```
 

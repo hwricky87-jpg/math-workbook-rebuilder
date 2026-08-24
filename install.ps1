@@ -88,7 +88,7 @@ foreach ($entry in @('.gitattributes', '.gitignore', '.github', 'README.md', 'CO
     }
 }
 
-foreach ($file in @('SKILL.md', 'LICENSE', 'NOTICE', 'run.py', 'requirements.txt', 'requirements-lock.txt', 'package.json', 'package-lock.json')) {
+foreach ($file in @('SKILL.md', 'LICENSE', 'NOTICE', 'install.ps1', 'run.py', 'requirements.txt', 'requirements-lock.txt', 'package.json', 'package-lock.json')) {
     $sourceFile = Join-Path $repoRoot $file
     if (Test-Path -LiteralPath $sourceFile) {
         Assert-NoReparseTree -LiteralPath (Join-Path $destination $file) -Purpose 'installed skill file'

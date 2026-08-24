@@ -123,6 +123,7 @@ def _preflight(skill_root: Path) -> tuple[str, str]:
         raise BootstrapError(f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer is required")
     required = (
         "SKILL.md",
+        "install.ps1",
         "requirements-lock.txt",
         "package.json",
         "package-lock.json",

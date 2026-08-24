@@ -249,6 +249,7 @@ def collect_report(skill_root: Path | None = None) -> dict[str, Any]:
     root = (skill_root or Path(__file__).resolve().parents[1]).resolve()
     required = (
         "SKILL.md",
+        "install.ps1",
         "run.py",
         "requirements-lock.txt",
         "package.json",

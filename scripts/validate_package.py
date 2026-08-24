@@ -19,6 +19,7 @@ FORBIDDEN_SUFFIXES = {
 EXCLUDED_PARTS = {".git", ".venv", "node_modules", "__pycache__"}
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 PORTABLE_REQUIRED = (
+    "install.ps1",
     "scripts/bootstrap.py",
     "scripts/doctor.py",
     "scripts/build_worksheet.py",
