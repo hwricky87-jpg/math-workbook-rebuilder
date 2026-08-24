@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -17,6 +18,22 @@ FORBIDDEN_SUFFIXES = {
 }
 EXCLUDED_PARTS = {".git", ".venv", "node_modules", "__pycache__"}
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+PORTABLE_REQUIRED = (
+    "scripts/bootstrap.py",
+    "scripts/doctor.py",
+    "scripts/build_worksheet.py",
+    "scripts/test_portable_e2e.py",
+    "scripts/test_installer_security.py",
+    "references/worksheet-renderer.md",
+    "assets/fonts/NanumGothic-Regular.ttf",
+    "assets/fonts/NanumGothic-Bold.ttf",
+    "assets/fonts/OFL.txt",
+)
+PINNED_ASSET_SHA256 = {
+    "assets/fonts/NanumGothic-Regular.ttf": "76f45ef4a6bcff344c837c95a7dcc26e017e38b5846d5ae0cdcb5b86be2e2d31",
+    "assets/fonts/NanumGothic-Bold.ttf": "f96298f9fb18e364d2370f4c3ce948ac67a2b61af992d7234bc15c42b033c674",
+    "assets/fonts/OFL.txt": "90f6a909ffb2af7f6422ea20042a26180fe5520cba80bbbf75a5e660320d7924",
+}
 
 
 def package_files() -> list[Path]:
@@ -120,6 +137,19 @@ def validate_public_files(files: list[Path], errors: list[str]) -> None:
                 errors.append(f"public repository safety file is missing: {relative}")
 
 
+def validate_portable_package(errors: list[str]) -> None:
+    for relative in PORTABLE_REQUIRED:
+        if not (SKILL_ROOT / relative).is_file():
+            errors.append(f"portable installation file is missing: {relative}")
+    for relative, expected in PINNED_ASSET_SHA256.items():
+        path = SKILL_ROOT / relative
+        if not path.is_file():
+            continue
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            errors.append(f"bundled portable asset hash changed: {relative}")
+
+
 def main() -> int:
     errors: list[str] = []
     files = package_files()
@@ -127,6 +157,7 @@ def main() -> int:
     validate_versions(errors)
     validate_links(files, errors)
     validate_public_files(files, errors)
+    validate_portable_package(errors)
     report = {"ok": not errors, "files_checked": len(files), "errors": errors}
     print(json.dumps(report, indent=2, ensure_ascii=True))
     return 0 if report["ok"] else 1

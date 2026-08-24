@@ -9,6 +9,32 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 $skillName = 'math-workbook-rebuilder'
+
+function Assert-NoReparseTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Purpose
+    )
+
+    if (-not (Test-Path -LiteralPath $LiteralPath)) {
+        return
+    }
+    $rootItem = Get-Item -LiteralPath $LiteralPath -Force
+    if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing a reparse point in $Purpose`: $LiteralPath"
+    }
+    if (-not $rootItem.PSIsContainer) {
+        return
+    }
+    foreach ($child in Get-ChildItem -LiteralPath $LiteralPath -Force -Recurse) {
+        if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing a reparse point in $Purpose`: $($child.FullName)"
+        }
+    }
+}
+
 if (-not $PSBoundParameters.ContainsKey('DestinationRoot')) {
     $agentSkillsFolder = if ($Agent -eq 'Claude') { '.claude\skills' } else { '.codex\skills' }
     $DestinationRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) $agentSkillsFolder
@@ -25,6 +51,20 @@ if (-not [string]::Equals([IO.Path]::GetDirectoryName($destination), $destinatio
 if ((Test-Path -LiteralPath $destination) -and ((Get-Item -LiteralPath $destination).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     throw "Refusing to install through a reparse-point destination: $destination"
 }
+$repoRootFull = [IO.Path]::GetFullPath($repoRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+if ([string]::Equals($repoRootFull, $destination, [StringComparison]::OrdinalIgnoreCase)) {
+    if ($InstallDependencies) {
+        python (Join-Path $destination 'scripts\bootstrap.py') --verify
+        if ($LASTEXITCODE -ne 0) {
+            throw 'In-place skill dependency setup or verification failed.'
+        }
+    }
+    Write-Output "The skill is already located at $destination"
+    if ($InstallDependencies) {
+        Write-Output 'Dependencies were isolated inside the installed skill folder.'
+    }
+    return
+}
 if (Test-Path -LiteralPath (Join-Path $destination '.git')) {
     throw "Refusing to overwrite a Git worktree. Install to a separate skill destination: $destination"
 }
@@ -39,10 +79,8 @@ foreach ($entry in @('.gitattributes', '.gitignore', '.github', 'README.md', 'CO
     if (-not (Test-Path -LiteralPath $legacyPath)) {
         continue
     }
+    Assert-NoReparseTree -LiteralPath $legacyPath -Purpose 'legacy installed skill content'
     $legacyItem = Get-Item -LiteralPath $legacyPath
-    if ($legacyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        throw "Refusing to remove a reparse-point legacy entry: $legacyPath"
-    }
     if ($legacyItem.PSIsContainer) {
         Remove-Item -LiteralPath $legacyPath -Recurse -Force
     } else {
@@ -53,12 +91,14 @@ foreach ($entry in @('.gitattributes', '.gitignore', '.github', 'README.md', 'CO
 foreach ($file in @('SKILL.md', 'LICENSE', 'NOTICE', 'run.py', 'requirements.txt', 'requirements-lock.txt', 'package.json', 'package-lock.json')) {
     $sourceFile = Join-Path $repoRoot $file
     if (Test-Path -LiteralPath $sourceFile) {
+        Assert-NoReparseTree -LiteralPath (Join-Path $destination $file) -Purpose 'installed skill file'
         Copy-Item -LiteralPath $sourceFile -Destination $destination -Force
     }
 }
 foreach ($folder in @('agents', 'assets', 'references', 'scripts')) {
     $sourceFolder = Join-Path $repoRoot $folder
     $destinationFolder = Join-Path $destination $folder
+    Assert-NoReparseTree -LiteralPath $destinationFolder -Purpose 'installed skill content'
     New-Item -ItemType Directory -Path $destinationFolder -Force | Out-Null
     Copy-Item -Path (Join-Path $sourceFolder '*') -Destination $destinationFolder -Recurse -Force
 }
@@ -66,24 +106,11 @@ foreach ($folder in @('agents', 'assets', 'references', 'scripts')) {
 if ($InstallDependencies) {
     $venv = Join-Path $destination '.venv'
     if ((Test-Path -LiteralPath $venv) -and ((Get-Item -LiteralPath $venv).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw "Refusing to replace a reparse-point virtual environment: $venv"
+        throw "Refusing to use a reparse-point virtual environment: $venv"
     }
-    python -m venv --clear $venv
+    python (Join-Path $destination 'scripts\bootstrap.py') --verify
     if ($LASTEXITCODE -ne 0) {
-        throw 'Skill-local Python virtual environment creation failed.'
-    }
-    $venvPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        Join-Path $venv 'Scripts\python.exe'
-    } else {
-        Join-Path $venv 'bin/python'
-    }
-    & $venvPython -m pip install --disable-pip-version-check --only-binary=:all: --require-virtualenv -r (Join-Path $destination 'requirements-lock.txt')
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Skill-local Python dependency installation failed.'
-    }
-    npm --prefix $destination ci --omit=dev --ignore-scripts
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Node dependency installation failed.'
+        throw 'Skill-local dependency setup or verification failed.'
     }
 }
 

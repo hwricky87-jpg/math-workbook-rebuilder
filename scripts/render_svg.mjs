@@ -24,7 +24,7 @@ for (const packageJson of packageCandidates) {
   }
 }
 if (!Resvg) {
-  console.error("@resvg/resvg-js is required. Run install.ps1 -InstallDependencies or npm ci --omit=dev --ignore-scripts in the skill folder.");
+  console.error("@resvg/resvg-js is required. Run: python run.py bootstrap.py --verify");
   if (loadError) console.error(loadError.message);
   process.exit(2);
 }
@@ -40,12 +40,24 @@ if (!Number.isFinite(scale) || scale <= 0) {
   process.exit(2);
 }
 
+const bundledFontDir = path.resolve(here, "..", "assets", "fonts");
+const configuredFontFiles = (process.env.MWR_FONT_FILES || "")
+  .split(path.delimiter)
+  .map((value) => value.trim())
+  .filter(Boolean)
+  .map((value) => path.resolve(value));
+const fontFiles = [
+  ...configuredFontFiles,
+  path.join(bundledFontDir, "NanumGothic-Regular.ttf"),
+  path.join(bundledFontDir, "NanumGothic-Bold.ttf"),
+].filter((fontPath, index, values) => fs.existsSync(fontPath) && values.indexOf(fontPath) === index);
+
 const renderer = new Resvg(fs.readFileSync(input, "utf8"), {
   background: "white",
   fitTo: { mode: "zoom", value: scale },
   font: {
-    fontFiles: ["C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/malgunbd.ttf"].filter(fs.existsSync),
-    loadSystemFonts: true,
+    fontFiles,
+    loadSystemFonts: false,
   },
 });
 fs.mkdirSync(path.dirname(path.resolve(output)), { recursive: true });

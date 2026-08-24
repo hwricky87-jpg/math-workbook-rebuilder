@@ -181,6 +181,8 @@ python <skill>/run.py validate_inventory.py source-inventory.json `
 
 `python <skill>/run.py validate_delivery.py work/qa/delivery.json`이 실패하면 PDF는 아직 완성품이 아니다.
 
+검증된 SVG/PNG를 A4 복습지로 조판할 때는 [worksheet-renderer.md](worksheet-renderer.md)의 JSON 형식과 `build_worksheet.py`를 사용할 수 있다. 렌더러는 도형을 새로 해석하지 않고 이미 승인된 그림만 배치하며, 번들 한글 글꼴·입력·그림·쪽별 픽셀의 SHA-256을 보고서에 남긴다. PNG를 실제로 열어 본 뒤 PDF를 요청했다면 `qa_pdf.py`의 페이지 렌더와 최종 문제 crop도 다시 연다.
+
 `final_problem_box`는 현재 `qa_pdf.py`의 `final_page_render` RGB 픽셀 좌표에서 half-open `[x0, y0, x1, y1]`로 기록한다. `final_problem_crop`은 그 정확한 bbox를 무배율로 자른 픽셀과 같아야 하며, 1×1 흰 픽셀 같은 비실질적 crop은 거부된다. `visual_review`는 이 source crop·comparison·final crop을 해시로 묶고 `validate_visual_review.py --require-final-crop`을 통과한 JSON이어야 한다. Delivery 검사기는 이를 다시 계산하므로 예전 PDF의 검수판을 새 PDF에 재사용할 수 없다.
 
 수정 작업은 baseline PDF와 허용 쪽/도형 ROI를 `compare_pdf_scope.py`에 주어 비대상 영역이 바뀌지 않았는지 확인한다. PDF QA와 범위 비교의 좌표 계약은 회전 `0`, `CropBox=MediaBox`, media origin `(0,0)`인 canonical page다. 다른 PDF geometry는 먼저 canonical PDF로 정규화하지 않으면 fail-closed로 거부된다.

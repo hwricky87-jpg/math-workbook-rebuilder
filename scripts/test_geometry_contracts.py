@@ -6,10 +6,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image, ImageDraw
 
@@ -17,7 +19,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from compare_geometry import _source_first_roi_mask  # noqa: E402
+from compare_geometry import _source_first_roi_mask, _svg_raster_cache_key  # noqa: E402
 from build_observation_overlay import render_overlay  # noqa: E402
 from validate_geometry import validate_artifact_evidence  # noqa: E402
 from validate_visual_review import GEOMETRY_ARTIFACTS, GEOMETRY_CHECKS  # noqa: E402
@@ -216,6 +218,20 @@ class GeometryEvidenceContractsTest(unittest.TestCase):
         self.assertIsNotNone(mask)
         self.assertEqual(label, "trace_evidence.source_geometry_roi")
         self.assertEqual(int((mask > 0).sum()), 90 * 20)
+
+    def test_svg_cache_key_tracks_configured_font_paths_and_bytes(self) -> None:
+        renderer = SCRIPT_DIR / "render_svg.mjs"
+        font = self.base / "configured-font.ttf"
+        font.write_bytes(b"font-version-a")
+        with mock.patch.dict(os.environ, {"MWR_FONT_FILES": str(font)}):
+            first = _svg_raster_cache_key(self.svg_path, renderer, 2.0)
+            font.write_bytes(b"font-version-b")
+            second = _svg_raster_cache_key(self.svg_path, renderer, 2.0)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MWR_FONT_FILES", None)
+            without_configured_font = _svg_raster_cache_key(self.svg_path, renderer, 2.0)
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(second, without_configured_font)
 
     def test_root_and_source_aliases_cannot_replace_trace_roi(self) -> None:
         tampered = copy.deepcopy(self.manifest)

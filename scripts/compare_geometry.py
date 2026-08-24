@@ -62,6 +62,30 @@ def _svg_raster_cache_key(path: Path, renderer: Path, scale: float) -> str:
     lockfile = renderer.parent.parent / "package-lock.json"
     if lockfile.is_file():
         digest.update(lockfile.read_bytes())
+    configured = os.environ.get("MWR_FONT_FILES", "")
+    digest.update(b"MWR_FONT_FILES\0" + configured.encode("utf-8", errors="surrogatepass"))
+    font_paths = [
+        Path(value.strip()).resolve()
+        for value in configured.split(os.pathsep)
+        if value.strip()
+    ]
+    font_paths.extend(
+        [
+            renderer.parent.parent / "assets" / "fonts" / "NanumGothic-Regular.ttf",
+            renderer.parent.parent / "assets" / "fonts" / "NanumGothic-Bold.ttf",
+        ]
+    )
+    seen: set[str] = set()
+    for font_path in font_paths:
+        key = os.path.normcase(str(font_path.resolve()))
+        if key in seen:
+            continue
+        seen.add(key)
+        digest.update(b"\0font\0" + key.encode("utf-8", errors="surrogatepass") + b"\0")
+        if font_path.is_file():
+            digest.update(font_path.read_bytes())
+        else:
+            digest.update(b"<missing>")
     digest.update(f"scale={scale:.8f}".encode("ascii"))
     return digest.hexdigest()
 

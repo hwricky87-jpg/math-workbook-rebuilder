@@ -48,8 +48,8 @@ STYLE_LIMITS = {
     "measure_halo": (0.0, 6.0),
 }
 
-FONT_FAMILY_CSS = "'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif"
-FONT_FAMILY_ATTR = "Noto Sans KR, Malgun Gothic, Apple SD Gothic Neo, Arial, sans-serif"
+FONT_FAMILY_CSS = "'NanumGothic','Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',Arial,sans-serif"
+FONT_FAMILY_ATTR = "NanumGothic, Noto Sans KR, Malgun Gothic, Apple SD Gothic Neo, Arial, sans-serif"
 
 
 def _resolve_render_style(manifest: dict[str, Any]) -> dict[str, float]:

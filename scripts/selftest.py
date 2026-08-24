@@ -328,8 +328,11 @@ def main() -> int:
     delivery_review = {
         "id": "fixture-01",
         "status": "approved",
-        "reviewer": "selftest-delivery-vision-reviewer",
-        "review_method": "Opened both PNGs in the image viewer at original detail.",
+        "reviewer": "synthetic-contract-fixture",
+        "review_method": (
+            "Synthetic positive fixture used only to exercise the delivery schema; "
+            "it is not evidence that a vision reviewer opened these images."
+        ),
         "artifacts": {
             name: {
                 "file": str(path),
@@ -839,8 +842,11 @@ def main() -> int:
     )
     visual_review_fixture = {
         "status": "approved",
-        "reviewer": "selftest-vision-reviewer",
-        "review_method": "Opened both PNGs in the image viewer at original detail.",
+        "reviewer": "synthetic-contract-fixture",
+        "review_method": (
+            "Synthetic positive fixture used only to exercise the visual-review validator; "
+            "it is not evidence that a vision reviewer opened these images."
+        ),
         "artifacts": {
             name: {
                 "file": str(visual_fixture_files[name]),

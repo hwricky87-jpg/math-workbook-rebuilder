@@ -68,6 +68,10 @@ jobs:
           scripts.test_markers
           scripts.test_visual_review
           scripts.test_validate_workbook_cache
+          scripts.test_portable_setup
+          scripts.test_build_worksheet
+          scripts.test_portable_e2e
+          scripts.test_installer_security
           -v
 
       - name: Test Codex and Claude Windows installers
@@ -82,6 +86,7 @@ jobs:
 
           .\install.ps1 -Agent Claude -InstallDependencies
           $claudeInstalled = Join-Path $profile '.claude\skills\math-workbook-rebuilder'
+          python (Join-Path $claudeInstalled 'run.py') doctor.py --json
           python (Join-Path $claudeInstalled 'run.py') validate_package.py
 
       - name: Confirm clean generated state

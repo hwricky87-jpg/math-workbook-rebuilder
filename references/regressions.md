@@ -296,3 +296,66 @@ stage command의 `worker.py` 해시는 같았지만 import된 `helper.py`의 값
 - PDF·delivery·revision 같은 workbook-wide gate는 모든 문항 선행단계에 의존한다.
 - 의존성을 전혀 선언하지 않은 stage는 안전하게 전체 선행 chain에 의존하는 기존 fail-closed 동작을 유지한다.
 - 회귀 시험은 p1 변경 뒤 p1만 cache miss, 독립 p2는 hit, PDF·delivery는 miss인지 확인한다.
+
+## portable-install-001 — GitHub 스킬 설치 뒤 첫 SVG 렌더가 실패함
+
+### 증상과 원인
+
+공식 skill-installer는 저장소 파일만 복사한다. 새 설치 폴더에는 `.venv`와 `node_modules`가 없었지만 예전 `run.py`는 전역 Python으로 조용히 실행되어, 환경에 따라 import 오류가 나거나 첫 resvg 렌더에서 중단됐다.
+
+### 영구 개선
+
+- 표준 라이브러리만 사용하는 `bootstrap.py`가 설치 폴더 안에 고정 버전 Python 환경과 로컬 resvg를 준비한다.
+- `doctor.py`가 잠금 버전, 로컬 Node 모듈, 번들 한글 글꼴의 release hash를 검사한다.
+- 런처는 스킬 로컬 환경이 없으면 production script를 전역 패키지로 실행하지 않고 bootstrap 명령을 안내한다.
+- 릴리스는 저장소 밖의 새 설치 경로에서 bootstrap·doctor·전체 회귀 시험을 다시 실행한다.
+
+## portable-layout-001 — 깨끗한 문제지가 작업 폴더의 임시 코드와 Windows 글꼴에 의존함
+
+### 증상과 원인
+
+한 문제의 결과는 보기 좋았지만 A4 배치 코드, 고정 해상도, 맑은 고딕 경로가 비공개 작업 폴더에만 있었다. 다른 컴퓨터의 공개 스킬만으로는 같은 조판을 만들 수 없었다.
+
+### 영구 개선
+
+- `build_worksheet.py`가 내용과 분리된 JSON으로 A4 PNG/PDF, 자동 페이지 분할, 풀이 공간을 재현한다.
+- unmodified NanumGothic Regular/Bold와 OFL을 배포하고 실제 선택 글꼴·입력·그림·쪽 픽셀 해시를 보고한다.
+- SVG 배치는 PyMuPDF가 아니라 bundled resvg를 사용해 짧은 점선이 실선으로 바뀌지 않게 한다.
+- 자동 시험은 검수 이미지를 만들되 “눈으로 열었다”고 승인하지 않는다. 릴리스 담당 vision agent가 원본, overlay, diagnostic, landmark, 최종 문제지를 실제로 연다.
+
+## portable-cache-001 — 글꼴을 바꿔도 예전 SVG 래스터가 재사용됨
+
+### 증상과 원인
+
+SVG 캐시 키가 SVG·렌더러·배율만 묶고 실제 픽셀 입력인 `MWR_FONT_FILES`와 글꼴 바이트를 묶지 않았다. 같은 SVG에서 글꼴 파일을 바꾼 뒤에도 이전 PNG가 cache hit로 반환될 수 있었다.
+
+### 영구 개선
+
+- 캐시 키에 구성 글꼴의 순서·정규화 경로·파일 바이트와 번들 글꼴 바이트를 포함한다.
+- resvg는 시스템 글꼴을 암묵적으로 읽지 않고, 명시한 글꼴과 배포본 글꼴만 사용한다.
+- 같은 경로의 글꼴 바이트 변경과 환경변수 제거가 모두 cache miss인지 회귀 시험한다.
+
+## portable-layout-002 — 학생란 높이 누락과 출력 경로 충돌
+
+### 증상과 원인
+
+제목 없이 이름·날짜란만 있을 때 pagination 높이에는 학생란이 빠졌지만 실제 렌더에는 그려졌다. 또한 PNG/PDF/report가 spec·figure·font와 같은 경로여도 허용되어 입력과 lineage를 덮어쓸 수 있었다.
+
+### 영구 개선
+
+- 학생란을 독립적인 header 요소로 측정·검증하고 실제 그리기 높이와 일치시킨다.
+- 모든 입력 경로와 모든 예정 출력 경로를 쓰기 전에 비교해 동일·중복 경로를 거부한다.
+- 페이지 하단 경계와 figure/spec 불변 해시를 회귀 시험한다.
+
+## portable-install-002 — 기존 설치 폴더의 junction이 외부 쓰기를 유도함
+
+### 증상과 원인
+
+기존 `scripts`, `.venv/Scripts`, `node_modules`가 외부 폴더를 가리키는 junction이면 복사·pip·npm이 스킬 밖을 수정할 수 있었다. 설치 폴더 안에서 설치기를 다시 실행하면 자기 파일을 지우는 경로도 있었다.
+
+### 영구 개선
+
+- 설치 대상 트리의 reparse point를 복사·삭제 전에 거부한다.
+- bootstrap은 `.venv`와 `node_modules`에서 skill runtime 밖으로 나가는 링크를 설치 전후 모두 거부한다.
+- in-place 실행은 파일 복사를 생략하고 선택한 dependency bootstrap만 수행한다.
+- 외부 junction 쓰기 0건과 in-place 파일 보존을 Windows 회귀 시험으로 고정한다.

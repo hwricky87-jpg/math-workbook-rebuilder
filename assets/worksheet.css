@@ -3,6 +3,20 @@
   margin: 13mm 14mm 15mm;
 }
 
+@font-face {
+  font-family: "MWR NanumGothic";
+  src: url("fonts/NanumGothic-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: "MWR NanumGothic";
+  src: url("fonts/NanumGothic-Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 700;
+}
+
 :root {
   --ink: #28334a;
   --muted: #6f7787;
@@ -19,7 +33,7 @@ html, body {
   padding: 0;
   color: var(--ink);
   background: var(--paper);
-  font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  font-family: "MWR NanumGothic", "NanumGothic", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
   font-size: 10.5pt;
   line-height: 1.62;
   word-break: keep-all;
