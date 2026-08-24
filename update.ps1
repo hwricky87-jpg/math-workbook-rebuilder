@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$DestinationRoot = (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\skills'),
+    [string]$DestinationRoot,
+    [ValidateSet('Codex', 'Claude')]
+    [string]$Agent = 'Codex',
     [switch]$InstallDependencies
 )
 
@@ -19,4 +21,11 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Git update failed.'
 }
 
-& (Join-Path $repoRoot 'install.ps1') -DestinationRoot $DestinationRoot -InstallDependencies:$InstallDependencies
+$installParameters = @{
+    Agent = $Agent
+    InstallDependencies = $InstallDependencies
+}
+if ($PSBoundParameters.ContainsKey('DestinationRoot')) {
+    $installParameters.DestinationRoot = $DestinationRoot
+}
+& (Join-Path $repoRoot 'install.ps1') @installParameters

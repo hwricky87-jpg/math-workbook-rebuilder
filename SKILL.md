@@ -51,7 +51,7 @@ The complete gate list and regression coverage are in [quality-gates.md](referen
 
 ## Common commands
 
-Use the launcher so an installed skill-local virtual environment is preferred without modifying other Python projects.
+Use the launcher so an installed skill-local virtual environment is preferred without modifying other Python projects. In the commands below, `<skill>` means the installed directory containing this `SKILL.md`, whether it was discovered by Codex or Claude Code.
 
 ```powershell
 python <skill>/run.py preprocess_geometry.py source.jpg --box x0 y0 x1 y1 --out inspection
