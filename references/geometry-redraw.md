@@ -52,9 +52,9 @@
 붙어 있는 가닥을 확대 화면에서 한 번 세는 것으로 다중도를 확정하지 않는다. 꼭짓점 주변 원형 측정과 간선 다발 중점의 수직 절단 측정을 서로 다른 증거로 남긴다.
 
 ```powershell
-python <skill>/scripts/imgprobe.py graph-crop.png --deg 120 85 `
+python <skill>/run.py imgprobe.py graph-crop.png --deg 120 85 `
   --radii 14 18 22 26 30 --stable-samples 3 --report K-degree.json
-python <skill>/scripts/imgprobe.py graph-crop.png --cut 120 85 210 150 `
+python <skill>/run.py imgprobe.py graph-crop.png --cut 120 85 210 150 `
   --half-lengths 8 12 16 20 24 --stable-samples 3 --report K-N-cut.json
 ```
 

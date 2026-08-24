@@ -1,10 +1,11 @@
 {
   "name": "math-workbook-rebuilder",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2"

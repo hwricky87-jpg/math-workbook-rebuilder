@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -32,6 +31,7 @@ from preprocess_geometry import (
     inspection_size,
     sheet_preview_size,
 )
+from process_utils import run_utf8
 from validate_delivery import validate_delivery_manifest
 from validate_geometry import (
     component_inventory_report,
@@ -63,11 +63,10 @@ def rasterize(path: Path) -> Image.Image:
     renderer = Path(__file__).with_name("render_svg.mjs")
     with tempfile.TemporaryDirectory(prefix="geometry-selftest-") as directory:
         output = Path(directory) / "render.png"
-        subprocess.run(
+        run_utf8(
             ["node", str(renderer), str(path), str(output), "2"],
             check=True,
             capture_output=True,
-            text=True,
         )
         return Image.open(output).convert("RGB").copy()
 
@@ -346,11 +345,11 @@ def main() -> int:
     radial_path = args.out / "ring-probe-source.png"
     radial_report_path = args.out / "ring-probe-report.json"
     radial_image.save(radial_path)
-    subprocess.run([
+    run_utf8([
         sys.executable, str(Path(__file__).with_name("imgprobe.py")), str(radial_path),
         "--deg", "100", "100", "--radii", "28", "32", "36", "40",
         "--stable-samples", "3", "--thr", "128", "--report", str(radial_report_path),
-    ], check=True, capture_output=True, text=True)
+    ], check=True, capture_output=True)
 
     cut_image = Image.new("L", (201, 201), 255)
     cut_draw = ImageDraw.Draw(cut_image)
@@ -361,14 +360,19 @@ def main() -> int:
     cut_path = args.out / "cut-probe-source.png"
     cut_report_path = args.out / "cut-probe-report.json"
     cut_image.save(cut_path)
-    subprocess.run([
+    run_utf8([
         sys.executable, str(Path(__file__).with_name("imgprobe.py")), str(cut_path),
         "--cut", "20", "100", "180", "100", "--half-lengths", "12", "15", "18", "21",
         "--stable-samples", "3", "--thr", "128", "--report", str(cut_report_path),
-    ], check=True, capture_output=True, text=True)
+    ], check=True, capture_output=True)
     imgprobe_cli_ok = (
         json.loads(radial_report_path.read_text(encoding="utf-8"))["degree"]["stable_count"] == 4
         and json.loads(cut_report_path.read_text(encoding="utf-8"))["cut"]["stable_count"] == 3
+    )
+    utf8_probe = run_utf8(
+        ["node", "-e", "process.stdout.write('한글 경로 UTF-8')"],
+        check=True,
+        capture_output=True,
     )
     stability_probe_ok = (
         stability_report([5, 5, 5, 6], 3)["stable_count"] == 5
@@ -765,6 +769,7 @@ def main() -> int:
         "midpoint_cut_probe": cut_probe_ok,
         "measurement_stability_gate": stability_probe_ok,
         "imgprobe_cli_json_reports": imgprobe_cli_ok,
+        "utf8_subprocess_output_decoded": utf8_probe.stdout.strip() == "한글 경로 UTF-8",
         "current_graph_probe_artifacts": graph_artifact_report["ok"],
         "full_real_source_graph_gate": (
             full_graph_manifest_report["ok"] and full_graph_artifact_report["ok"]

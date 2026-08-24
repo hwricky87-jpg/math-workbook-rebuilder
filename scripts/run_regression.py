@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
 
 from geometry_svg import render_manifest
+from process_utils import run_utf8
 from validate_geometry import svg_fit, validate_manifest
 
 
@@ -38,11 +38,10 @@ def main() -> int:
             svg_path.write_text(svg, encoding="utf-8")
             manifest_report = validate_manifest(manifest)
             fit_report = svg_fit(svg)
-            subprocess.run(
+            run_utf8(
                 ["node", str(renderer), str(svg_path), str(png_path), "2"],
                 check=True,
                 capture_output=True,
-                text=True,
             )
             ok = bool(manifest_report["ok"] and fit_report["ok"])
             case = {

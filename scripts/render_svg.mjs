@@ -24,7 +24,7 @@ for (const packageJson of packageCandidates) {
   }
 }
 if (!Resvg) {
-  console.error("@resvg/resvg-js is required. Run install.ps1 -InstallDependencies or npm install in the skill folder.");
+  console.error("@resvg/resvg-js is required. Run install.ps1 -InstallDependencies or npm ci --omit=dev --ignore-scripts in the skill folder.");
   if (loadError) console.error(loadError.message);
   process.exit(2);
 }
