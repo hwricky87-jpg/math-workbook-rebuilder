@@ -61,14 +61,19 @@ jobs:
       - name: Run regression self-test
         run: python scripts/selftest.py --out "${{ runner.temp }}/math-workbook-rebuilder-selftest"
 
-      - name: Test isolated Windows installer
+      - name: Test Codex and Claude Windows installers
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $destinationRoot = Join-Path '${{ runner.temp }}' 'isolated-skills'
-          .\install.ps1 -DestinationRoot $destinationRoot -InstallDependencies
-          $installed = Join-Path $destinationRoot 'math-workbook-rebuilder'
-          python (Join-Path $installed 'run.py') validate_package.py
+          $profile = [Environment]::GetFolderPath('UserProfile')
+
+          .\install.ps1 -Agent Codex
+          $codexInstalled = Join-Path $profile '.codex\skills\math-workbook-rebuilder'
+          python (Join-Path $codexInstalled 'run.py') validate_package.py
+
+          .\install.ps1 -Agent Claude -InstallDependencies
+          $claudeInstalled = Join-Path $profile '.claude\skills\math-workbook-rebuilder'
+          python (Join-Path $claudeInstalled 'run.py') validate_package.py
 
       - name: Confirm clean generated state
         run: git diff --check

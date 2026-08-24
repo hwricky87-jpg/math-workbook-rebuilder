@@ -1,6 +1,6 @@
 # Math Workbook Rebuilder
 
-A Codex skill for rebuilding Korean math worksheets from photographed workbook pages. It preserves problem text and geometry, removes handwriting, redraws diagrams as verified SVG, and requires source-to-output comparison before PDF delivery.
+An Agent Skill for Codex and Claude Code that rebuilds Korean math worksheets from photographed workbook pages. It preserves problem text and geometry, removes handwriting, redraws diagrams as verified SVG, and requires source-to-output comparison before PDF delivery.
 
 ## Why this exists
 
@@ -37,7 +37,7 @@ If you know a better way to inspect source images, reconstruct geometry, verify 
 
 ## Requirements
 
-- Codex desktop app, Codex CLI, or IDE extension with local skill support
+- Codex desktop app, Codex CLI, an IDE extension with local skill support, or Claude Code
 - Python 3.10 or newer
 - Python packages pinned in `requirements-lock.txt`
 - Node.js 22 or newer for `scripts/render_svg.mjs`; current Node.js 24 LTS is recommended
@@ -48,10 +48,15 @@ If you know a better way to inspect source images, reconstruct geometry, verify 
 ```powershell
 git clone https://github.com/hwricky87-jpg/math-workbook-rebuilder.git
 cd math-workbook-rebuilder
-.\install.ps1 -InstallDependencies
+
+# Codex (default)
+.\install.ps1 -Agent Codex -InstallDependencies
+
+# Claude Code
+.\install.ps1 -Agent Claude -InstallDependencies
 ```
 
-The default destination is `%USERPROFILE%\.codex\skills\math-workbook-rebuilder`. Restart Codex if the skill does not appear immediately.
+Codex installs to `%USERPROFILE%\.codex\skills\math-workbook-rebuilder`; Claude Code installs to `%USERPROFILE%\.claude\skills\math-workbook-rebuilder`. The `SKILL.md` workflow and supporting files are shared Agent Skill content. Claude Code ignores the optional Codex UI metadata in `agents/openai.yaml`.
 
 `-InstallDependencies` creates `.venv` inside the installed skill, installs the pinned binary Python packages there, and uses `npm ci --ignore-scripts` for the local SVG rasterizer. It does not modify another project's Python environment and requests no API key.
 
@@ -60,7 +65,11 @@ The default destination is `%USERPROFILE%\.codex\skills\math-workbook-rebuilder`
 Run this from the cloned repository:
 
 ```powershell
-.\update.ps1 -InstallDependencies
+# Update the Codex installation
+.\update.ps1 -Agent Codex -InstallDependencies
+
+# Update the Claude Code installation
+.\update.ps1 -Agent Claude -InstallDependencies
 ```
 
 The update refuses a dirty source clone and uses a fast-forward-only Git pull. Dependencies remain isolated inside the installed skill.
@@ -68,7 +77,12 @@ The update refuses a dirty source clone and uses a fast-forward-only Git pull. D
 ## Verify
 
 ```powershell
+# Codex installation
 python "$env:USERPROFILE\.codex\skills\math-workbook-rebuilder\run.py" selftest.py --out .\qa-selftest
+
+# Claude Code installation
+python "$env:USERPROFILE\.claude\skills\math-workbook-rebuilder\run.py" selftest.py --out .\qa-selftest-claude
+
 python .\scripts\validate_package.py
 ```
 

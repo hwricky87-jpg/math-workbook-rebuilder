@@ -1,12 +1,18 @@
 [CmdletBinding()]
 param(
-    [string]$DestinationRoot = (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\skills'),
+    [string]$DestinationRoot,
+    [ValidateSet('Codex', 'Claude')]
+    [string]$Agent = 'Codex',
     [switch]$InstallDependencies
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 $skillName = 'math-workbook-rebuilder'
+if (-not $PSBoundParameters.ContainsKey('DestinationRoot')) {
+    $agentSkillsFolder = if ($Agent -eq 'Claude') { '.claude\skills' } else { '.codex\skills' }
+    $DestinationRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) $agentSkillsFolder
+}
 $destinationRootFull = [IO.Path]::GetFullPath($DestinationRoot)
 $pathRoot = [IO.Path]::GetPathRoot($destinationRootFull)
 if (-not [string]::Equals($destinationRootFull, $pathRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -85,4 +91,4 @@ Write-Output "Installed $skillName to $destination"
 if ($InstallDependencies) {
     Write-Output 'Dependencies were isolated inside the installed skill folder.'
 }
-Write-Output 'Restart Codex if the skill does not appear immediately.'
+Write-Output "Restart $Agent if the skill does not appear immediately."
