@@ -19,9 +19,30 @@ if (-not [string]::Equals([IO.Path]::GetDirectoryName($destination), $destinatio
 if ((Test-Path -LiteralPath $destination) -and ((Get-Item -LiteralPath $destination).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     throw "Refusing to install through a reparse-point destination: $destination"
 }
+if (Test-Path -LiteralPath (Join-Path $destination '.git')) {
+    throw "Refusing to overwrite a Git worktree. Install to a separate skill destination: $destination"
+}
 
 New-Item -ItemType Directory -Path $destinationRootFull -Force | Out-Null
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
+
+# Older releases could leave repository-only files in the installed skill folder.
+# Remove only this fixed, known list; never enumerate or modify sibling skills.
+foreach ($entry in @('.gitattributes', '.gitignore', '.github', 'README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'requirements-audit.txt', 'install.ps1', 'update.ps1')) {
+    $legacyPath = Join-Path $destination $entry
+    if (-not (Test-Path -LiteralPath $legacyPath)) {
+        continue
+    }
+    $legacyItem = Get-Item -LiteralPath $legacyPath
+    if ($legacyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing to remove a reparse-point legacy entry: $legacyPath"
+    }
+    if ($legacyItem.PSIsContainer) {
+        Remove-Item -LiteralPath $legacyPath -Recurse -Force
+    } else {
+        Remove-Item -LiteralPath $legacyPath -Force
+    }
+}
 
 foreach ($file in @('SKILL.md', 'LICENSE', 'NOTICE', 'run.py', 'requirements.txt', 'requirements-lock.txt', 'package.json', 'package-lock.json')) {
     $sourceFile = Join-Path $repoRoot $file
