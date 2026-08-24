@@ -118,7 +118,7 @@ output/                 사용자용 PDF
 }
 ```
 
-`python <skill>/scripts/validate_delivery.py work/qa/delivery.json`이 실패하면 PDF는 아직 완성품이 아니다.
+`python <skill>/run.py validate_delivery.py work/qa/delivery.json`이 실패하면 PDF는 아직 완성품이 아니다.
 
 ## 6. 반복 개선
 

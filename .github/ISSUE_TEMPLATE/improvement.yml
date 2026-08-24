@@ -1,0 +1,30 @@
+name: Improvement proposal
+description: Suggest a safer or more accurate method without sharing workbook or student data.
+title: "[Improvement] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the method with synthetic examples only. Do not attach real workbook pages, student information, generated worksheets, QA images, or PDFs.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to improve
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed method and measurable benefit
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy and rights confirmation
+      options:
+        - label: This proposal contains no student data or third-party material I lack permission to distribute.
+          required: true

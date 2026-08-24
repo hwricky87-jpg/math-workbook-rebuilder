@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible failure using synthetic, non-private data only.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not upload workbook photographs, student information, generated worksheets, QA images, PDFs, credentials, or unredacted local paths. Use a minimal synthetic example you have the right to share. Report vulnerabilities through private vulnerability reporting instead.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Installation or update
+        - Transcription workflow
+        - Geometry rendering
+        - Geometry validation
+        - PDF validation
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the failure without including private or copyrighted source material.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal synthetic reproduction
+      description: Provide steps and synthetic text, JSON, or SVG created for this report.
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Release, operating system, Python version, and Node.js version.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy and rights confirmation
+      options:
+        - label: I removed student information, workbook scans, generated worksheets, PDFs, credentials, metadata, and unredacted local paths.
+          required: true
+        - label: Every attached artifact is synthetic or mine to distribute.
+          required: true

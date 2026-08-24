@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/hwricky87-jpg/math-workbook-rebuilder/security/advisories/new
+    about: Report vulnerabilities privately and never attach workbook or student data.

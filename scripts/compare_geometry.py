@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
 import tempfile
 import math
 import time
@@ -18,6 +17,7 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
+from process_utils import run_utf8
 from validate_geometry import trace_alignment
 
 
@@ -81,11 +81,10 @@ def rasterize_svg(
     if not use_cache:
         with tempfile.TemporaryDirectory(prefix="geometry-render-") as directory:
             output = Path(directory) / "render.png"
-            subprocess.run(
+            run_utf8(
                 ["node", str(renderer), str(path), str(output), str(scale)],
                 check=True,
                 capture_output=True,
-                text=True,
             )
             return Image.open(output).convert("RGB").copy()
 
@@ -103,11 +102,10 @@ def rasterize_svg(
 
     with tempfile.TemporaryDirectory(prefix="geometry-render-") as directory:
         output = Path(directory) / "render.png"
-        subprocess.run(
+        run_utf8(
             ["node", str(renderer), str(path), str(output), str(scale)],
             check=True,
             capture_output=True,
-            text=True,
         )
         image = Image.open(output).convert("RGB").copy()
         temporary_cache = cache_root / f".{cache_key}-{os.getpid()}.tmp"
