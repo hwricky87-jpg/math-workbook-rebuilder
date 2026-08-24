@@ -95,7 +95,8 @@ def validate_public_files(files: list[Path], errors: list[str]) -> None:
         if path.name == ".env" or path.name.startswith(".env."):
             errors.append(f"environment file must not be distributed: {relative}")
 
-    if (SKILL_ROOT / "README.md").is_file():
+    is_public_checkout = (SKILL_ROOT / ".git").exists() or (SKILL_ROOT / ".github").exists()
+    if is_public_checkout:
         required = (
             "SECURITY.md",
             "CONTRIBUTING.md",
