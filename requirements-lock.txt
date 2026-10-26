@@ -1,5 +1,5 @@
 # Tested binary-only runtime set. install.ps1 installs this file into a skill-local venv.
-pip==26.2.1
+pip==26.2.2
 numpy==2.2.6; python_version < "3.11"
 numpy==2.4.3; python_version == "3.11"
 numpy==2.5.2; python_version >= "3.12"
